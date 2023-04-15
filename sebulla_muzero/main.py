@@ -38,7 +38,7 @@ from utils import TrainState, nonlinux_make_env, make_categorical_representation
 from network import make_muzero_network, NetworkApplys
 from actor import make_rollout_fn, make_mcts_fn
 from learner import make_prepare_data_fn, make_single_device_update
-from replay_buffer import ReplayBuffer, Trajectory, start_replay_buffer_manager
+from replay_buffer import start_replay_buffer_manager
 
 def parse_args():
     # fmt: off
@@ -116,13 +116,13 @@ ATARI_MAX_FRAMES = int(
 )
 
 # TODO: change this to *args
-def make_env_helper(system, env_id, seed, local_num_envs, async_batch_size=None):
+def make_env_helper(system, env_id, seed, local_num_envs):
     if system == "Linux":
-        return make_env(env_id, seed, local_num_envs, async_batch_size)
+        return make_env(env_id, seed, local_num_envs)
     else:
-        return nonlinux_make_env(env_id, seed, local_num_envs, async_batch_size)
+        return nonlinux_make_env(env_id, seed, local_num_envs)
 
-def make_env(env_id, seed, num_envs, batch_size):
+def make_env(env_id, seed, num_envs):
     def thunk():
         envs = envpool.make(
             env_id,
@@ -170,8 +170,8 @@ if __name__ == "__main__":
         for process_index in range(args.world_size)
         for d_id in args.actor_device_ids
     ]
-    print("global_learner_decices", global_learner_decices)
-    print("global_learner_decices", global_actor_decices)
+    print("global_learner_decices", len(global_learner_decices))
+    print("global_learner_decices", len(global_actor_decices))
     args.global_learner_decices = [str(item) for item in global_learner_decices]
     args.actor_devices = [str(item) for item in actor_devices]
     args.learner_devices = [str(item) for item in learner_devices]
@@ -191,7 +191,7 @@ if __name__ == "__main__":
     key, network_key, buffer_key = jax.random.split(key, 3)
 
     # env setup
-    envs = make_env_helper(system, args.env_id, args.seed, args.local_num_envs, args.async_batch_size)()
+    envs = make_env_helper(system, args.env_id, args.seed, args.local_num_envs)()
     args.obs_sample = envs.observation_space.sample()
     args.num_actions = envs.single_action_space.n
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
@@ -249,6 +249,7 @@ if __name__ == "__main__":
 
     import multiprocessing as mp
     num_cpus = mp.cpu_count()
+    print(f"num_cpus {num_cpus}")
     fair_num_cpus = num_cpus // len(args.actor_device_ids) 
     dummy_writer = SimpleNamespace()
     dummy_writer.add_scalar = lambda x,y,z: None
@@ -271,88 +272,87 @@ if __name__ == "__main__":
                     rollout_queue,
                     params_queue,
                     writer if d_idx == 0 and thread_id == 0 else dummy_writer,
-                    learner_devices,
                     d_idx * args.num_actor_threads + thread_id,
                 ),
             ).start()
             params_queues.append(params_queue)
 
-    batch_queue = queue.Queue(maxsize=5) # arbitrary
-    start_replay_buffer_manager(rollout_queue, batch_queue, args, key)
+    # batch_queue = queue.Queue(maxsize=5) # arbitrary
+    # start_replay_buffer_manager(rollout_queue, batch_queue, args, key)
     
-    batch_queue_get_time = deque(maxlen=10)
-    data_transfer_time = deque(maxlen=10)
-    learner_network_version = 0
-    while True:
-        learner_network_version += 1
+    # batch_queue_get_time = deque(maxlen=10)
+    # data_transfer_time = deque(maxlen=10)
+    # learner_network_version = 0
+    # while True:
+    #     learner_network_version += 1
 
-        batch_queue_get_start = time.time()
-        (
-            global_step,
-            actor_network_version,
-            avg_params_queue_get_time,
-            batch
-        ) = batch_queue.get()
+    #     batch_queue_get_start = time.time()
+    #     (
+    #         global_step,
+    #         actor_network_version,
+    #         avg_params_queue_get_time,
+    #         batch
+    #     ) = batch_queue.get()
 
-        batch_queue_get_time.append(time.time() - batch_queue_get_start)
-        writer.add_scalar("stats/batch_queue_get_time", np.mean(batch_queue_get_time), global_step)
-        writer.add_scalar("stats/batch_params_queue_get_time_diff", np.mean(batch_queue_get_time) - avg_params_queue_get_time, global_step)
+    #     batch_queue_get_time.append(time.time() - batch_queue_get_start)
+    #     writer.add_scalar("stats/batch_queue_get_time", np.mean(batch_queue_get_time), global_step)
+    #     writer.add_scalar("stats/batch_params_queue_get_time_diff", np.mean(batch_queue_get_time) - avg_params_queue_get_time, global_step)
 
-        shard_fn = lambda x: jax.device_put_sharded(
-            jax.array_split(x, len(learner_devices), axis=0),
-            learner_devices
-        )
+    #     shard_fn = lambda x: jax.device_put_sharded(
+    #         jax.array_split(x, len(learner_devices), axis=0),
+    #         learner_devices
+    #     )
 
-        training_time_start = time.time()
-        sharded_batch = jax.tree_map(shard_fn, batch)
-        muzero_state, loss, v_loss, p_loss, r_loss = multi_device_update(
-                muzero_state, sharded_batch
-        )
+    #     training_time_start = time.time()
+    #     sharded_batch = jax.tree_map(shard_fn, batch)
+    #     muzero_state, loss, v_loss, p_loss, r_loss = multi_device_update(
+    #             muzero_state, sharded_batch
+    #     )
 
-        for d_idx, d_id in enumerate(args.actor_device_ids):
-            device_params = jax.device_put(flax.jax_utils.unreplicate(muzero_state.params), local_devices[d_id])
-            for thread_id in range(args.num_actor_threads):
-                params_queues[d_idx * args.num_actor_threads + thread_id].put(device_params)
+    #     for d_idx, d_id in enumerate(args.actor_device_ids):
+    #         device_params = jax.device_put(flax.jax_utils.unreplicate(muzero_state.params), local_devices[d_id])
+    #         for thread_id in range(args.num_actor_threads):
+    #             params_queues[d_idx * args.num_actor_threads + thread_id].put(device_params)
                 
-        writer.add_scalar("stats/training_time", time.time() - training_time_start, global_step)
-        writer.add_scalar("stats/rollout_queue_size", rollout_queue.qsize(), global_step)
-        writer.add_scalar("stats/params_queue_size", params_queue.qsize(), global_step)
-        print(
-            global_step,
-            f"actor_policy_version={actor_network_version}, learner_policy_version={learner_network_version}, training time: {time.time() - training_time_start}s", # learner_network_version
-        )
+    #     writer.add_scalar("stats/training_time", time.time() - training_time_start, global_step)
+    #     writer.add_scalar("stats/rollout_queue_size", rollout_queue.qsize(), global_step)
+    #     writer.add_scalar("stats/params_queue_size", params_queue.qsize(), global_step)
+    #     print(
+    #         global_step,
+    #         f"actor_policy_version={actor_network_version}, learner_policy_version={learner_network_version}, training time: {time.time() - training_time_start}s", # learner_network_version
+    #     )
 
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
-        # writer.add_scalar("charts/learning_rate", muzero.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
-        # writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
-        # writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
-        # writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
-        # writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
-        # if update >= args.num_updates:
-        #     break
+    #     # TRY NOT TO MODIFY: record rewards for plotting purposes
+    #     # writer.add_scalar("charts/learning_rate", muzero.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
+    #     # writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
+    #     # writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
+    #     # writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
+    #     # writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
+    #     # if update >= args.num_updates:
+    #     #     break
 
-    """ 
-    batch contents 
-        observation_stack: (1024, 94, 84, 84)
-            (batch_size, num_stacked_frames*3, *observation_shape)
-        actions: (1024, 32+5)
-            (batch_size, num_stacked_frames+num_unroll_steps)
-        value_targets: (1024, 6, 601)
-            (batch_size, num_unroll_steps+1, support_size)
-        policy_targets: (1024, 6, 4)
-            (batch_size, num_unroll_steps+1, num_actions)
-        reward_targets: (1024, 5, 601)
-            (batch_size, num_unroll_steps, support_size)
-    """
+    # """ 
+    # batch contents 
+    #     observation_stack: (1024, 94, 84, 84)
+    #         (batch_size, num_stacked_frames*3, *observation_shape)
+    #     actions: (1024, 32+5)
+    #         (batch_size, num_stacked_frames+num_unroll_steps)
+    #     value_targets: (1024, 6, 601)
+    #         (batch_size, num_unroll_steps+1, support_size)
+    #     policy_targets: (1024, 6, 4)
+    #         (batch_size, num_unroll_steps+1, num_actions)
+    #     reward_targets: (1024, 5, 601)
+    #         (batch_size, num_unroll_steps, support_size)
+    # """
 
-    # Efficient Zero obviously is an implementation of Atari scale replay buffer, you can see how they did it
-    # for now get MuZero completely working on DMControl
-    # much smaller memory needs and much faster training
-    # Will need to change
-        # network arch
-        # observation and action stacking 
-        # parallel mcts per action dimension
-        # replay buffer
+    # # Efficient Zero obviously is an implementation of Atari scale replay buffer, you can see how they did it
+    # # for now get MuZero completely working on DMControl
+    # # much smaller memory needs and much faster training
+    # # Will need to change
+    #     # network arch
+    #     # observation and action stacking 
+    #     # parallel mcts per action dimension
+    #     # replay buffer
 
 
-    # so priorities are updated 
+    # # so priorities are updated 

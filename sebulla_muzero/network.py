@@ -168,21 +168,6 @@ def make_muzero_network(
 
         # NOTE: batch size need to be dynamic to accomodate inference and training
         def make_initial_encoding(obs, action):
-            B, T, C, H, W = obs.shape
-            missing_frames = args.num_stacked_frames - T
-            missing_action_frames = args.num_stacked_frames - action.shape[1]
-            if missing_frames:
-                missing_obs = jnp.zeros((B, missing_frames, C, H, W), dtype=jnp.float32)
-                obs = jnp.concatenate([missing_obs, obs], axis=1)
-
-            if missing_action_frames:
-                # if len(action.shape) == 2:
-                #     missing_action_frames -= action.shape[-1]
-                missing_action = jnp.zeros((B, missing_action_frames), dtype=jnp.float32) # obs is availible before action
-                action = jnp.concatenate([missing_action, action], axis=1)
-
-            obs = obs[:, :, :3] # TODO: ask costa about 4 channel 
-            obs = obs.reshape(B, args.num_stacked_frames*3, H, W) # C
             action = bias_plane_action_encoding_fn(action) # TODO: need to add normalization to this (action index / number of actions)
             encoding = jnp.concatenate([obs, action], axis=1)
             assert encoding.shape[1:] == (128, 84, 84)
@@ -204,7 +189,7 @@ def make_muzero_network(
 
         def init(observation, actions):
             """ This is only used to initialize the params. Never for inference. """
-            chex.assert_rank([observation, actions], [5, 2]) 
+            chex.assert_rank([observation, actions], [4, 2]) 
             
             embedding, _, _ = initial_inference(observation, actions)
             dummy_action = actions[:, -1].squeeze()

@@ -80,20 +80,24 @@ def make_rollout_fn(actor_device, applys, args, make_env):
                 env_recv_time += time.time() - env_recv_time_start
                 global_step += len(next_done) * len_actor_device_ids * args.world_size
                 env_id = info['env_id']
-                
+
                 if timestep == 0:
                     action_stack = np.zeros((args.num_stacked_frames, args.local_num_envs))
-                    
+
                 elif timestep < args.num_stacked_frames + 1:
                     num_missing = args.num_stacked_frames - timestep
                     missing_actions = np.zeros((num_missing, args.local_num_envs))
                     current_actions = np.stack(actions)
                     action_stack = np.concatenate((missing_actions, current_actions))
 
+                # TODO: fix recompilation on 
                 else:
-                    action_stack = np.stack(actions[-args.num_stacked_frames:])
-                
+                    action_stack = actions[-args.num_stacked_frames:]
+                    action_stack = np.stack(action_stack)
+
                 action_stack = action_stack.transpose(1, 0)
+                assert action_stack.shape == (args.local_num_envs, args.num_stacked_frames)
+
                 inference_time_start = time.time()
                 action, value, mcts_policy, key = mcts_fn(params, next_obs, action_stack, key)
                 print(f"Thread {device_thread_id} finished {timestep} in {time.time() - inference_time_start}")
@@ -212,7 +216,7 @@ def make_bulk_array(
 ################################################
 #################### MCTS ######################
 
-def make_mcts_fn(actor_device, job_queue, applys, num_simulations, gamma):
+def make_mcts_fn(actor_device, applys, num_simulations, gamma):
 
         def recurrent_fn(params, rng, action, prev_embedding):
             embedding, reward, value, policy = applys.recurrent_inference(
@@ -248,7 +252,7 @@ def make_mcts_fn(actor_device, job_queue, applys, num_simulations, gamma):
             # TODO: you don't want predicted value you want root values of search tree
             return output['action'], value, output['action_weights'], rng
  
-        return jax.jit(mcts)#, device=actor_device)
+        return jax.jit(mcts, device=actor_device)
 
 #################### MCTS ######################
 ################################################

@@ -9,7 +9,7 @@ from functools import partial
 import queue
 import threading
 
-from learner import prepare_data_fn
+#from learner import make_prepare_data_fn
 
 State = Any
 Sample = Any
@@ -152,6 +152,8 @@ def start_replay_buffer_manager(rollout_queue, batch_queue, args, key):
   Conviences function for starting the replay buffer manager.
   Responsible for managing the communication between the actor and learner processes
   """
+
+  prepare_data_fn = make_prepare_data_fn(args, learner_devices, scla)
 
   def rollout_queue_to_replay_buffer(replay_buffer, buffer_state_queue, rollout_queue):
         """ Thread dedicated to processing rollouts and inserting data in the replay buffer."""
