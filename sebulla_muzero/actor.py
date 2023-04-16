@@ -181,7 +181,7 @@ def make_rollout_fn(actor_device, applys, args, make_env):
                     
                 else:
                     prefix_obs = last_rollout.obs[:, -args.num_stacked_frames:, :, :, :]
-                    prefix_action = last_rollout.action[:, -args.num_stacked_frames:]
+                    prefix_action = last_rollout.actions[:, -args.num_stacked_frames:]
                     
                 return current_rollout.replace(
                     obs=np.concatenate([prefix_obs, current_rollout.obs], axis=1),
@@ -202,12 +202,10 @@ def make_rollout_fn(actor_device, applys, args, make_env):
                     dones=np.concatenate([last_rollout.dones, suffix_dones], axis=1)
                 )
 
-
             current_rollout = prefix_padding(current_rollout, last_rollout, initial_obs, args)
             if last_rollout is not None:
                 last_rollout = suffix_padding(current_rollout, last_rollout, args)
                 payload_rollout = last_rollout
-                last_rollout = current_rollout
 
                 # store data
                 payload = (
@@ -220,6 +218,8 @@ def make_rollout_fn(actor_device, applys, args, make_env):
                 rollout_queue.put(payload)
                 rollout_queue_put_time.append(time.time() - rollout_queue_put_time_start)
                 writer.add_scalar("stats/rollout_queue_put_time", np.mean(rollout_queue_put_time), global_step)
+
+            last_rollout = current_rollout
 
             writer.add_scalar(
                 "charts/SPS_update",
@@ -242,6 +242,8 @@ class Rollout:
     mcts_policies: np.ndarray
     rewards: np.ndarray
     dones: np.ndarray
+    
+    # TODO: move the padding functions to be methods of this class
 
 @jax.jit
 def format_rollout(
