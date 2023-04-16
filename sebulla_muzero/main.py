@@ -51,6 +51,8 @@ def parse_args():
         help="whether to save model into the `runs/{run_name}` folder")
     parser.add_argument("--env-id", type=str, default="Breakout-v5",
         help="the id of the environment")
+    parser.add_argument("--gray_scale", type=bool, default=False,
+        help="the id of the environment")
     parser.add_argument("--total_trainsteps", type=int, default=1_000_000,
         help="total timesteps of the experiments")
     parser.add_argument("--local-num-envs", type=int, default=5, 
@@ -77,7 +79,7 @@ def parse_args():
         help="coefficient of the value function")
     parser.add_argument("--num-stacked-frames", type=int, default=32,
         help="number of historical observation frames used to produce initial embedding")
-    parser.add_argument("--observation-resolution", type=int, default=84,
+    parser.add_argument("--obs-resolution", type=int, default=84,
         help="atari observation resolution")
     parser.add_argument("--embedding-resolution", type=int, default=6,
         help="learned embedding resolution")
@@ -108,6 +110,7 @@ def parse_args():
 
     args = parser.parse_args()
     args.num_steps = args.sequence_length
+    args.channels_per_frame = 1 if args.gray_scale else 3
     return args
 
 
@@ -129,7 +132,7 @@ def make_env(env_id, seed, num_envs):
             env_type="gym",
             num_envs=num_envs,
             stack_num=args.num_stacked_frames,
-            gray_scale=False,
+            gray_scale=args.gray_scale,
             episodic_life=True,  # Espeholt et al., 2018, Tab. G.1
             repeat_action_probability=0,  # Hessel et al., 2022 (Muesli) Tab. 10
             noop_max=30,  # Espeholt et al., 2018, Tab. C.1 "Up to 30 no-ops at the beginning of each episode."
@@ -171,7 +174,7 @@ if __name__ == "__main__":
         for d_id in args.actor_device_ids
     ]
     print("global_learner_decices", len(global_learner_decices))
-    print("global_learner_decices", len(global_actor_decices))
+    print("global_actor_decices", len(global_actor_decices))
     args.global_learner_decices = [str(item) for item in global_learner_decices]
     args.actor_devices = [str(item) for item in actor_devices]
     args.learner_devices = [str(item) for item in learner_devices]
@@ -192,7 +195,7 @@ if __name__ == "__main__":
 
     # env setup
     envs = make_env_helper(system, args.env_id, args.seed, args.local_num_envs)()
-    args.obs_sample = envs.observation_space.sample()
+    args.obs_shape = envs.observation_space.shape
     args.num_actions = envs.single_action_space.n
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
@@ -205,7 +208,7 @@ if __name__ == "__main__":
     # move all these to a help config
     scalar_to_categorical, categorical_to_scalar = make_categorical_representation_fns(args.support_size)
     tiled_action_encoding_fn, bias_plane_action_encoding_fn = make_action_encoding_fn(
-        args.embedding_resolution, args.observation_resolution, args.num_actions
+        args.embedding_resolution, args.obs_resolution, args.num_actions
         )
 
     network = make_muzero_network(
@@ -218,7 +221,7 @@ if __name__ == "__main__":
     )
     applys = NetworkApplys(*network.apply)
 
-    init_obs = jnp.zeros((args.local_num_envs,  *args.obs_sample.shape))
+    init_obs = jnp.zeros((args.local_num_envs,  *args.obs_shape))
     init_action = jnp.zeros((args.local_num_envs, args.num_stacked_frames))
     network_params = network.init(network_key, init_obs, init_action)
     # TODO: resolve optimizer
@@ -254,7 +257,7 @@ if __name__ == "__main__":
     dummy_writer = SimpleNamespace()
     dummy_writer.add_scalar = lambda x,y,z: None
 
-    rollout_queue = queue.Queue(maxsize=args.num_actor_threads * len(args.actor_device_ids))
+    rollout_queue = queue.Queue(maxsize=10)#args.num_actor_threads * len(args.actor_device_ids))
     params_queues = []
 
     for d_idx, d_id in enumerate(args.actor_device_ids):

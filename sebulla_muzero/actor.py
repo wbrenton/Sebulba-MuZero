@@ -4,9 +4,9 @@ from collections import deque
 
 import jax
 import mctx
-import rlax
 import numpy as np
 import jax.numpy as jnp
+from flax import struct
 
 ################################################
 #################### rollout ###################
@@ -32,7 +32,7 @@ def make_rollout_fn(actor_device, applys, args, make_env):
         device_thread_id,
         ):
         print(f"Thread {device_thread_id} started!")
-        
+
         envs = make_env(system, args.env_id, args.seed + device_thread_id, args.local_num_envs)()
         len_actor_device_ids = len(args.actor_device_ids)
         global_step = 0
@@ -51,13 +51,15 @@ def make_rollout_fn(actor_device, applys, args, make_env):
         rollout_queue_put_time = deque(maxlen=10)
         actor_policy_version = 0
 
+        params = None
+        last_rollout = None
         while True:
             update_time_start = time.time()
             obs = []
             dones = []
             actions = []
-            values = []
             rewards = []
+            mcts_values = []
             mcts_policies = []
             truncations = []
             terminations = []
@@ -67,11 +69,12 @@ def make_rollout_fn(actor_device, applys, args, make_env):
             env_send_time = 0
 
             # get params
-            params_queue_get_time_start = time.time()
-            params = params_queue.get()
-            actor_policy_version += 1
-            params_queue_get_time.append(time.time() - params_queue_get_time_start)
-            writer.add_scalar("stats/params_queue_get_time", np.mean(params_queue_get_time), global_step)
+            if params is None:
+                params_queue_get_time_start = time.time()
+                params = params_queue.get()
+                actor_policy_version += 1
+                params_queue_get_time.append(time.time() - params_queue_get_time_start)
+                writer.add_scalar("stats/params_queue_get_time", np.mean(params_queue_get_time), global_step)
 
             rollout_time_start = time.time()
             for timestep in range(0, args.num_steps):
@@ -82,6 +85,7 @@ def make_rollout_fn(actor_device, applys, args, make_env):
                 env_id = info['env_id']
 
                 if timestep == 0:
+                    initial_obs = next_obs
                     action_stack = np.zeros((args.num_stacked_frames, args.local_num_envs))
 
                 elif timestep < args.num_stacked_frames + 1:
@@ -90,7 +94,7 @@ def make_rollout_fn(actor_device, applys, args, make_env):
                     current_actions = np.stack(actions)
                     action_stack = np.concatenate((missing_actions, current_actions))
 
-                # TODO: fix recompilation on 
+                # TODO: fix recompilation on 33rd iteration
                 else:
                     action_stack = actions[-args.num_stacked_frames:]
                     action_stack = np.stack(action_stack)
@@ -99,11 +103,12 @@ def make_rollout_fn(actor_device, applys, args, make_env):
                 assert action_stack.shape == (args.local_num_envs, args.num_stacked_frames)
 
                 inference_time_start = time.time()
-                action, value, mcts_policy, key = mcts_fn(params, next_obs, action_stack, key)
+                action, mcts_value, mcts_policy, key = mcts_fn(params, next_obs, action_stack, key)
                 print(f"Thread {device_thread_id} finished {timestep} in {time.time() - inference_time_start}")
                 inference_time += time.time() - inference_time_start
+                
                 action = jax.device_get(action)
-                value = jax.device_get(value)
+                mcts_value = jax.device_get(mcts_value)
                 mcts_policies = jax.device_get(mcts_policies)
                 key = jax.device_get(key)
 
@@ -111,10 +116,10 @@ def make_rollout_fn(actor_device, applys, args, make_env):
                 envs.send(np.array(action), env_id)
                 env_send_time += time.time() - env_send_time_start
                 storage_time_start = time.time()
-                obs.append(next_obs[:, -3:, :, :])
+                obs.append(next_obs[:, -args.channels_per_frame:, :, :])
                 dones.append(next_done)
                 actions.append(action)
-                values.append(value)
+                mcts_values.append(mcts_value)
                 mcts_policies.append(mcts_policy)
                 rewards.append(next_reward)
                 truncated = info["elapsed_step"] >= envs.spec.config.max_episode_steps
@@ -135,7 +140,7 @@ def make_rollout_fn(actor_device, applys, args, make_env):
             
             if args.profile:
                 action.block_until_ready()
-            
+
             # logs
             rollout_time.append(time.time() - rollout_time_start)
             writer.add_scalar("stats/rollout_time", np.mean(rollout_time), global_step)
@@ -156,31 +161,65 @@ def make_rollout_fn(actor_device, applys, args, make_env):
             # `make_bulk_array` is actually important. It accumulates the data from the lists
             # into single bulk arrays, which later makes transferring the data to the learner's
             # device slightly faster. See https://wandb.ai/costa-huang/cleanRL/reports/data-transfer-optimization--VmlldzozNjU5MTg1
-            if args.learner_device_ids[0] != args.actor_device_ids[0]:
-                obs, actions, values, mcts_policies, rewards = make_bulk_array(
-                    obs,
-                    actions,
-                    values,
-                    mcts_policies,
-                    rewards
-                )
-
-            # store data
-            payload = (
-                global_step,
+            #if args.learner_device_ids[0] != args.actor_device_ids[0]:
+            current_rollout = format_rollout(
                 obs,
-                values,
                 actions,
+                mcts_values,
                 mcts_policies,
                 rewards,
-                dones,
-                rewards,
-                np.mean(params_queue_get_time),
+                dones
             )
-            rollout_queue_put_time_start = time.time()
-            rollout_queue.put(payload)
-            rollout_queue_put_time.append(time.time() - rollout_queue_put_time_start)
-            writer.add_scalar("stats/rollout_queue_put_time", np.mean(rollout_queue_put_time), global_step)
+
+            def prefix_padding(current_rollout, last_rollout, initial_obs, args):
+                # use the last rollout to pad the current rollout
+                if last_rollout is None:
+                    prefix_obs = initial_obs.reshape(
+                        args.local_num_envs, args.num_stacked_frames, args.channels_per_frame, args.obs_resolution, args.obs_resolution
+                        )
+                    prefix_action = np.zeros((args.local_num_envs, args.num_stacked_frames), dtype=np.float32)
+                    
+                else:
+                    prefix_obs = last_rollout.obs[:, -args.num_stacked_frames:, :, :, :]
+                    prefix_action = last_rollout.action[:, -args.num_stacked_frames:]
+                    
+                return current_rollout.replace(
+                    obs=np.concatenate([prefix_obs, current_rollout.obs], axis=1),
+                    actions=np.concatenate([prefix_action, current_rollout.actions], axis=1),
+                )
+
+            def suffix_padding(current_rollout, last_rollout, args):
+                # use the current rollout to pad the last rollout
+                suffix_index = args.num_unroll_steps + args.td_steps
+                suffix_value = current_rollout.mcts_values[:, :suffix_index]
+                suffix_policies = current_rollout.mcts_policies[:, :suffix_index]
+                suffix_rewards = current_rollout.rewards[:, :suffix_index]
+                suffix_dones = current_rollout.dones[:, :suffix_index]
+                return last_rollout.replace(
+                    mcts_values=np.concatenate([last_rollout.mcts_values, suffix_value], axis=1),
+                    mcts_policies=np.concatenate([last_rollout.mcts_policies, suffix_policies], axis=1),
+                    rewards=np.concatenate([last_rollout.rewards, suffix_rewards], axis=1),
+                    dones=np.concatenate([last_rollout.dones, suffix_dones], axis=1)
+                )
+
+
+            current_rollout = prefix_padding(current_rollout, last_rollout, initial_obs, args)
+            if last_rollout is not None:
+                last_rollout = suffix_padding(current_rollout, last_rollout, args)
+                payload_rollout = last_rollout
+                last_rollout = current_rollout
+
+                # store data
+                payload = (
+                    global_step,
+                    payload_rollout,
+                    np.mean(params_queue_get_time),
+                )
+                print("payload placed in rollout_queue")
+                rollout_queue_put_time_start = time.time()
+                rollout_queue.put(payload)
+                rollout_queue_put_time.append(time.time() - rollout_queue_put_time_start)
+                writer.add_scalar("stats/rollout_queue_put_time", np.mean(rollout_queue_put_time), global_step)
 
             writer.add_scalar(
                 "charts/SPS_update",
@@ -195,20 +234,41 @@ def make_rollout_fn(actor_device, applys, args, make_env):
             )
     return rollout_fn
 
+@struct.dataclass
+class Rollout:
+    obs: np.ndarray
+    actions: np.ndarray
+    mcts_values: np.ndarray
+    mcts_policies: np.ndarray
+    rewards: np.ndarray
+    dones: np.ndarray
+
 @jax.jit
-def make_bulk_array(
+def format_rollout(
     obs: list,
     actions: list,
-    values: list,
+    mcts_values: list,
     mcts_policies: list,
     rewards: list,
+    dones: list
 ):
     obs = jnp.asarray(obs)
     actions = jnp.asarray(actions)
-    values = jnp.asarray(values)
+    mcts_values = jnp.asarray(mcts_values)
     mcts_policies = jnp.asarray(mcts_policies)
     rewards = jnp.asarray(rewards)
-    return obs, values, actions, mcts_policies, rewards
+    dones = jnp.asarray(dones)
+    
+    return Rollout(
+        obs=obs.transpose(1, 0, 2, 3, 4),
+        actions=actions.transpose(1, 0),
+        mcts_values=mcts_values.transpose(1, 0),
+        mcts_policies=mcts_policies.transpose(1, 0, 2),
+        rewards=rewards.transpose(1, 0),
+        dones=dones.transpose(1, 0),
+    )
+
+
 
 #################### rollout ###################
 ################################################
