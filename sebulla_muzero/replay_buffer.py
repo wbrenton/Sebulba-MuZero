@@ -1,15 +1,16 @@
+import time
+import queue
+import threading
+from typing import Any, Union 
+
+import numpy as np
 import jax
 import jax.numpy as jnp
 from flax import struct
-from typing import Any, Tuple
-from jax.random import PRNGKey
-from jax.flatten_util import ravel_pytree
-from functools import partial
 
-import queue
-import threading
+import pickle
+import zstandard as zstd
 
-#from learner import make_prepare_data_fn
 
 State = Any
 Sample = Any
@@ -30,182 +31,249 @@ class Batch:
     value: jnp.ndarray
     policy: jnp.ndarray
     reward: jnp.ndarray
+    
+class GameHistory:
+  def __init__(self, config=None):
+    self.config = config
+    self.max_length = config.sequence_length
+    
+    self.prefix_length = config.num_stacked_frames
+    self.suffix_length = config.num_unroll_steps + config.td_steps
 
-@struct.dataclass
-class ReplayBufferState:
-    """Contains data related to a replay buffer."""
-    data: jnp.ndarray
-    current_position: jnp.ndarray
-    current_size: jnp.ndarray
-    added_samples: jnp.ndarray
-    key: PRNGKey
+    self.observations = []
+    self.actions = []
+    self.value_targets = []
+    self.policy_targets = []
+    self.rewards = []
+    self.dones = []
+
+  # TODO: need a good method for managing features before and after the scope of this game history
+  def init(self, obs, action, value_target, policy_target, reward, done):
+    self.observations.extend(obs)
+    self.actions.extend(action)
+    self.value_targets.extend(value_target)
+    self.policy_targets.extend(policy_target)
+    self.rewards.extend(reward)
+    self.dones.extend(done)
+
+  def make_features(self, step_idx):
+    # TODO: need to look at dones and zero out value predictions after done
+    """
+    Given a step index returns the corresponding features for that game history.
+    Real Index:
+      [] indicates valid step_idx range
+      -prefix_length ...... [0 ....... sequence_length] ........ + suffix_length
+    Prefixed features:
+      range: -prefix_length ...... [0 ....... sequence_length]
+      features: obs, action
+    Suffixed features:
+      range: [0 ....... sequence_length] ........ + suffix_length
+      features: value, policy, reward
+      
+    Note: prefixed features need to be shifted by prefix_length to align with suffixed features.
+          That is the job of prefix_step_idx.
+    """
+    K = self.config.num_unroll_steps
+    # prefixed
+    prefix_step_idx = step_idx + self.prefix_length
+    obs = np.asarray(self.observations[prefix_step_idx - self.prefix_length : prefix_step_idx])
+    action = np.asarray(self.actions[prefix_step_idx - self.prefix_length : prefix_step_idx+K])
+    # suffixed
+    value = np.asarray(self.value_targets[step_idx:step_idx+K])
+    policy = np.asarray(self.policy_targets[step_idx:step_idx+K])
+    rewards = np.asarray(self.rewards[step_idx:step_idx+K])
+    return obs, action, value, policy, rewards
+
+  def _make_obs_stack(self):
+    pass
+  
+  def _prevent_episode_boundry_crossing(self):
+    pass
+  
+  def assert_match(self, priority):
+    return len(self) == len(priority) - self.prefix_length - self.suffix_length
+  
+  def __len__(self):
+    prefixed_vars_len = len(self.observations) - self.prefix_length
+    suffixed_vars_len = len(self.dones) - self.suffix_length
+    full_vars_len = len(self.actions) - self.prefix_length - self.suffix_length
+    assert prefixed_vars_len == suffixed_vars_len == full_vars_len, "GameHistory variables must be the same length."
+    return prefixed_vars_len
 
 class ReplayBuffer:
   """
-  Priotized experience replay buffer.
+  Replay buffer for storing GameHistory objects and their associated priorities.
+  
+  Due to large memory requirements, zstd compression is used to compress each GameHistory object in the buffer.
+  They are decompressed on the fly when sampled.
+  
+  Compression Factor: 
+    Uncompressed GameHistory
+    Compressed GameHistory
 
-  Modified port of brax.training.replay_buffers
-  https://github.com/google/brax/blob/b373f5a45e62189a4a260131c17b10181ccda96a/brax/training/replay_buffers.py
-
+  This class is largely a port of Efficient Zero Ye et al. (2020) https://arxiv.org/pdf/2111.00210.pdf
   """
 
-  def __init__(self, max_replay_size: int, dummy_data_sample: Sample,
-                sample_batch_size: int) -> State:
-    """Init the replay buffer."""
-    # takes in (batch, time, ...) outputs (batch, time * ...)
-    self._flatten_fn = jax.vmap(lambda x: ravel_pytree(x)[0], axis_name="time")
+  def __init__(self, max_size: int, batch_size: int, config) -> None:
+    self.args = config.args
+    self.batch_size = batch_size
+    self.max_size = max_size
+    self.base_index = 0
+    self.collected_count = 0
+    self.alpha = 1
+    self.beta = 1
 
-    # takes in (time, ...) outputs (time * ...)
-    dummy_flatten, self._unflatten_fn = ravel_pytree(dummy_data_sample)
-    # takes in (batch, time, ...) outputs (batch, time * ...)
-    self._unflatten_fn = jax.vmap(self._unflatten_fn, axis_name="time")
-    data_size = len(dummy_flatten)
+    self.buffer: list[GameHistory] = []
+    self.priorities: Union[None, np.ndarray] = None
+    self.game_lookup: list[list[tuple]] = [] # each tuple is (game_index, step_index)
 
-    self._data_shape = (max_replay_size, data_size)
-    self._data_dtype = dummy_flatten.dtype
-    self._sample_batch_size = sample_batch_size
+    self.game_steps_seen = 0
+    self.game_steps_to_start = batch_size * 1 # how many batches do you want to collect before starting to sample
 
-  def init(self, key: PRNGKey) -> ReplayBufferState:
-    return ReplayBufferState(
-        data=jnp.zeros(self._data_shape, self._data_dtype),
-        current_size=jnp.zeros((), jnp.int32),
-        current_position=jnp.zeros((), jnp.int32),
-        added_samples=jnp.zeros((), jnp.int32),
-        key=key)
-
-  def insert(self, buffer_state: State, samples: Sample) -> State:
-    """Insert data in the replay buffer.
-
-    Args:
-      buffer_state: Buffer state
-      samples: Sample to insert with a leading batch size.
-
-    Returns:
-      New buffer state.
-    """
-    if buffer_state.data.shape != self._data_shape:
-      raise ValueError(
-          f'buffer_state.data.shape ({buffer_state.data.shape}) '
-          f'doesn\'t match the expected value ({self._data_shape})')
-
-    update = self._flatten_fn(samples)
-    data = buffer_state.data
-
-    # Make sure update is not larger than the maximum replay size.
-    if len(update) > len(data):
-      raise ValueError(
-          'Trying to insert a batch of samples larger than the maximum replay '
-          f'size. num_samples: {len(update)}, max replay size {len(data)}')
-
-    # If needed, roll the buffer to make sure there's enough space to fit
-    # `update` after the current position.
-    position = buffer_state.current_position
-    roll = jnp.minimum(0, len(data) - position - len(update))
-    data = jax.lax.cond(roll, lambda: jnp.roll(data, roll, axis=0),
-                        lambda: data)
-    position = position + roll
-
-    # Update the buffer and the control numbers.
-    data = jax.lax.dynamic_update_slice_in_dim(data, update, position, axis=0)
-    position = (position + len(update)) % len(data)
-    size = jnp.minimum(buffer_state.current_size + len(update), len(data))
-    added_samples = buffer_state.added_samples + len(update)
-
-    return buffer_state.replace(
-        data=data, current_position=position, current_size=size, added_samples=added_samples)
-
-  def sample(self, buffer_state: State) -> Tuple[State, Sample]:
-    """Sample a batch of data according to prioritized experience replay."""
-    key, sample_key = jax.random.split(buffer_state.key)
-    buffer = self._unflatten_fn(buffer_state.data)
-    flat_idx = jnp.argsort(buffer.priority.flatten())[-self._sample_batch_size:]
-    batch_idx, time_idx = jnp.unravel_index(flat_idx, buffer.priority.shape)
-
-    def _index(feature, batch_idx, time_idx, size):
-
-      @partial(jax.vmap)
-      def batched_slice(sample, idx):
-        # NOTE: dynamic_slice_in_dim say's it takes arrays in documentation but throws error "start_index must be a scalar"
-        return jax.lax.dynamic_slice_in_dim(sample, idx, size)
-
-      start_index = jnp.maximum(time_idx - size, 0) # don't wrap around
-      sample = feature.at[batch_idx].get()
-      stack = batched_slice(sample, start_index)
-
-      return stack
-
-    return Batch(
-      observation=_index(buffer.observation, batch_idx, time_idx, 2),
-      actions=_index(buffer.action, batch_idx, time_idx, 1),
-      value=_index(buffer.value_target, batch_idx, time_idx, 1),
-      policy=_index(buffer.policy_target, batch_idx, time_idx, 1),
-      reward=_index(buffer.reward_target, batch_idx, time_idx, 1),
-    ), buffer_state.replace(key=sample_key)
-
-  def size(self, buffer_state: State) -> int:
-    """Total amount of elements that are sampleable."""
+    self.zstd_compressor = zstd.ZstdCompressor()
+    self.zstd_decompressor = zstd.ZstdDecompressor()
     
-    return buffer_state.current_size
+    self.scalar_to_categorical = jax.jit(config.scalar_to_categorical, backend="cpu")
+
+  def put_games(self, games: tuple[GameHistory, np.ndarray]) -> None:
+    """
+    Add a list of games (tuples of game_history and priorities) to the replay buffer.
+    """
+    for game_history, priority in games:
+      self._put_game(game_history, priority)
+
+
+  def _put_game(self, game: GameHistory, priorities: np.ndarray) -> None:
+    """
+    Add a game_history and corresponding priorities to the replay buffer.
+    """
+    #assert game_history.assert_match(priorities), "GameHistory and priorities must be the same length."
+    assert len(game) == len(priorities), "GameHistory and priorities must be the same length"
+
+    bytes = pickle.dumps(game)
+    compressed_game = self.zstd_compressor.compress(bytes)
+    self.buffer.append(compressed_game)
+    self.priorities = priorities if not self.game_steps_seen else np.concatenate([self.priorities, priorities])
+    self.game_lookup += [(self.base_index + len(self.buffer) - 1, step_index) for step_index in range(len(game))]
+    self.game_steps_seen += len(game) * self.args.sequence_length
+
+  def sample(self):
+    """
+    Sample a batch according to PER and calculate the importance sampling weights to correct for bias in loss calculation.
+
+    i.e. 
+    """
+    if self.game_steps_to_start > self.game_steps_seen:
+      return None 
+    universe = len(self.priorities)
+    sample_probs = np.power(self.priorities, self.alpha)
+    sample_probs = np.divide(sample_probs, np.sum(sample_probs))
+    sampled_indices = np.random.choice(universe, size=self.batch_size, p=sample_probs, replace=False)
+    weights = (1 / universe) * np.reciprocal(sample_probs[sampled_indices])
+    weights = np.power(weights, self.beta)
+
+    # create decompression efficient index 'smart_indicies' {game_index: [step_indices]}
+    # to prevent redundant decompression of the same game_history
+    smart_indicies = {}
+    for index in sampled_indices:
+      game_index, step_index = self.game_lookup[index]
+      if game_index not in smart_indicies:
+        smart_indicies[game_index] = []
+      smart_indicies[game_index].append(step_index)
+
+    observations = []
+    actions = []
+    values = []
+    policies = []
+    rewards = []
+    for game_index in smart_indicies.keys():
+      bytes = self.zstd_decompressor.decompress(self.buffer[game_index])
+      game_history = pickle.loads(bytes)
+      for step_index in smart_indicies[game_index]:
+        obs, action, value, policy, reward = game_history.make_features(step_index)
+        observations.append(obs)
+        actions.append(action)
+        values.append(value)
+        policies.append(policy)
+        rewards.append(reward)
+
+    observations = np.asarray(observations)
+    actions = np.asarray(actions)
+    values = np.asarray(values)
+    policies = np.asarray(policies)
+    rewards = np.asarray(rewards)
+    
+    values = self.scalar_to_categorical(values)
+    rewards = self.scalar_to_categorical(rewards)
+    
+    batch = Batch(
+      observation=observations,
+      actions=actions,
+      value=values,
+      policy=policies,
+      reward=rewards
+    )
+    
+    return batch, weights, sampled_indices
+
+  def update_priorities(self, indices: np.ndarray, priorities: np.ndarray) -> None:
+    """
+    Update the priorities of the replay buffer.
+    """
+    self.priorities[indices] = priorities
+
+
+##############################################################################################################
   
-def start_replay_buffer_manager(rollout_queue, batch_queue, args, key):
+def start_replay_buffer_manager(rollout_queue, batch_queue, config):
   """
   Conviences function for starting the replay buffer manager.
   Responsible for managing the communication between the actor and learner processes
   """
+  args = config.args
 
-  prepare_data_fn = make_prepare_data_fn(args, learner_devices, scla)
+  def preprocess_data(rollout):
+    """Convert a batched rollout to a list of GameHistory objects."""
+    
+    game_histories = []
+    for i in range(args.local_num_envs):
+      game_history = GameHistory(args)
+      game_history.init(
+          obs=rollout.obs[i],
+          action=rollout.actions[i],
+          value_target=rollout.value_targets[i],
+          policy_target=rollout.policy_targets[i],
+          reward=rollout.rewards[i],
+          done=rollout.dones[i],
+          )
+      game_histories.append((game_history, rollout.priorities[i]))
+    return game_histories
 
-  def rollout_queue_to_replay_buffer(replay_buffer, buffer_state_queue, rollout_queue):
+  def rollout_queue_to_replay_buffer(replay_buffer, queue, rollout_queue):
         """ Thread dedicated to processing rollouts and inserting data in the replay buffer."""
         while True:
-          # rollouts are put in the queue every num_steps == rollout_length
-          # TODO: plan out logic to get preceding and following observations
-          (
-              global_step,
-              obs,
-              values,
-              actions,
-              mcts_policies,
-              rewards,
-              dones,
-              rewards,
-              params_queue_get_time
-          ) = rollout_queue.get()
-
-          trajectory = prepare_data_fn(
-              obs,
-              dones,
-              values,
-              actions,
-              mcts_policies,
-              rewards
-          )
-          buffer_state = buffer_state_queue.get()
-          buffer_state = replay_buffer.insert(buffer_state, trajectory)
-          buffer_state_queue.put(buffer_state)
+          rollouts = rollout_queue.get()
+          game_histories = preprocess_data(rollouts)
+          replay_buffer = queue.get()
+          replay_buffer.put_games(game_histories)
+          queue.put(replay_buffer)
     
-  def replay_buffer_to_batch_queue(replay_buffer, buffer_state_queue, batch_queue):
+  def replay_buffer_to_batch_queue(replay_buffer, queue, batch_queue):
       """Thread dedicated to sampling data from the replay buffer and populating the batch queue."""
       while True:
-          buffer_state = buffer_state_queue.get()
-          buffer_state = replay_buffer.sample(buffer_state)
-          buffer_state_queue.put(buffer_state)
-          batch_queue.put(buffer_state)
+          replay_buffer = queue.get()
+          batch = replay_buffer.sample()
+          if batch is None: 
+            queue.put(replay_buffer)
+            time.sleep(1)
+            continue
+          queue.put(replay_buffer)
+          batch_queue.put(batch)
 
-  unstacked_observation = args.obs_sample[-3:, :, :]
-  init_trajectory = Trajectory(
-    observation=jnp.zeros((args.num_steps, unstacked_observation), dtype=jnp.float32),
-    action=jnp.zeros((args.num_steps,), dtype=jnp.float32),
-    value_target=jnp.zeros((args.num_steps,), dtype=jnp.float32),
-    policy_target=jnp.zeros((args.num_steps, args.num_actions), dtype=jnp.float32),
-    reward_target=jnp.zeros((args.num_steps,), dtype=jnp.float32)
-  )
+  replay_buffer = ReplayBuffer(args.buffer_size, args.batch_size, config)
 
-  replay_buffer = ReplayBuffer(args.max_replay_size, init_trajectory, args.batch_size)
-  buffer_state = replay_buffer.init(key)
-  
-  buffer_state_queue = queue.Queue(1)
-  buffer_state_queue.put(buffer_state)
-  
-  threading.Thread(target=rollout_queue_to_replay_buffer, args=(replay_buffer, buffer_state_queue, rollout_queue)).start()
-  threading.Thread(target=replay_buffer_to_batch_queue, args=(replay_buffer, buffer_state_queue, batch_queue)).start()
+  access_queue = queue.Queue(1)
+  access_queue.put(replay_buffer)
+
+  threading.Thread(target=rollout_queue_to_replay_buffer, args=(replay_buffer, access_queue, rollout_queue)).start()
+  threading.Thread(target=replay_buffer_to_batch_queue, args=(replay_buffer, access_queue, batch_queue)).start()

@@ -42,16 +42,16 @@ def make_action_encoding_fn(embeding_resolution, obs_resolution, num_actions):
     """
     Turns a batch of actions into a ont-hot encoding tiled to (batch_dim, resolution, resolution)
     """
-    
+
     def tiled_encoding(action):
         """Turns a scalar action into a ont-hot encoding tiled to (resolution, resolution)"""
         one_hot = jax.nn.one_hot(action, num_actions)
         reshape = jnp.reshape(one_hot, (2, 2))
         return jnp.tile(reshape, (embeding_resolution // 2, embeding_resolution // 2))
-    
+
     def bias_plane_encoding(scalar_action):
-        return jnp.broadcast_to(scalar_action, (obs_resolution, obs_resolution))
-    
+        return jnp.broadcast_to(scalar_action, (obs_resolution, obs_resolution)) / num_actions
+
     return jax.vmap(tiled_encoding), jax.vmap(jax.vmap(bias_plane_encoding))
 
 def make_categorical_representation_fns(support_size):
@@ -66,7 +66,7 @@ def make_categorical_representation_fns(support_size):
     tx = rlax.muzero_pair(num_bins=support_size,
                         min_value=support_min,
                         max_value=support_max,
-                        tx=nonlinear_bellman.SIGNED_HYPERBOLIC_PAIR)
+                        tx=nonlinear_bellman.SIGNED_HYPERBOLIC_PAIR) # h(x) in Schrittwieser et al., 2020, Appendix F
 
     def scalar_to_categorical(scalar):
         return tx.apply(scalar)

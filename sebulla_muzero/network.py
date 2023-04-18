@@ -78,7 +78,7 @@ class RepresentationNetwork(hk.Module):
     def __call__(self, input):
         # assert input.shape == (batch_dim, 96, 96, 128)
         x = jnp.transpose(input, (0, 2, 3, 1))
-        x = x / (255.0)
+        #x = x / (255.0)
         x = self.conv_0(x)
         x = self.tower_0(x)
         x = self.conv_1(x)
@@ -137,15 +137,7 @@ class PredictionNetwork(hk.Module):
 
         return value, policy
 
-def make_muzero_network(
-    support_size,
-    num_actions,
-    categorical_to_scalar,
-    args,
-    tiled_action_encoding_fn,
-    bias_plane_action_encoding_fn,
-    downscale_hiddens=1,
-    downscale_blocks=1):
+def make_muzero_network(config):
     """
     Creates a MuZero network composed of:
         h(x) Representation Network
@@ -155,36 +147,36 @@ def make_muzero_network(
         f(x) Prediction Network
             - maps embedding to policy and value
     """
-    asserts = lambda x: type(x) == int and x > 0
-    assert asserts(downscale_hiddens) and asserts(downscale_blocks), "downscale_hiddens and downscale_blocks must be positive integers"
-
-    num_blocks = 10 // downscale_blocks
-    num_hiddens = 256 // downscale_hiddens
+    num_blocks = 10
+    num_hiddens = 256
+    support_size = config.args.support_size
+    num_actions = config.args.num_actions
 
     def fn():
         representation_net = RepresentationNetwork()
-        dynamics_net = DynamicsNetwork(num_blocks, num_hiddens, support_size, tiled_action_encoding_fn)
+        dynamics_net = DynamicsNetwork(num_blocks, num_hiddens, support_size, config.tiled_action_encoding_fn)
         prediction_net = PredictionNetwork(support_size, num_actions)
 
         # NOTE: batch size need to be dynamic to accomodate inference and training
         def make_initial_encoding(obs, action):
-            action = bias_plane_action_encoding_fn(action) # TODO: need to add normalization to this (action index / number of actions)
+            obs = obs / 255.0
+            action = config.bias_plane_action_encoding_fn(action) 
             encoding = jnp.concatenate([obs, action], axis=1)
-            assert encoding.shape[1:] == (128, 84, 84)
+            assert encoding.shape[1:] == (128, 84, 84) or encoding.shape[1:] == (64, 84, 84)
             return encoding 
 
         def initial_inference(observations, actions, scalar=False):
             input = make_initial_encoding(observations, actions)
             embedding = representation_net(input)
             value, policy = prediction_net(embedding)
-            value = categorical_to_scalar(value) if scalar else value
+            value = config.categorical_to_scalar(value) if scalar else value
             return embedding, value, policy
 
         def recurrent_inference(embedding, action, scalar=False):
             next_embedding, reward = dynamics_net(embedding, action)
             value, policy = prediction_net(next_embedding)
-            reward = categorical_to_scalar(reward) if scalar else reward
-            value = categorical_to_scalar(value) if scalar else value
+            reward = config.categorical_to_scalar(reward) if scalar else reward
+            value = config.categorical_to_scalar(value) if scalar else value
             return embedding, reward, value, policy
 
         def init(observation, actions):

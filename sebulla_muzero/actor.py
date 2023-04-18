@@ -8,9 +8,57 @@ import numpy as np
 import jax.numpy as jnp
 from flax import struct
 
+from learner import make_compute_value_target
+from utils import softmax_temperature_fn
+
 ################################################
 #################### rollout ###################
+# TODO: padding with priorities is avoiding the complexity of an indexing system accounting for prefix and suffix
+# currently the solution to prefix and suffix pad with zeros to prevent sampling in the padding region
 
+@struct.dataclass
+class Rollout:
+    """A class for storing batched rollout data with methods for padding used during training."""
+    obs: np.ndarray
+    actions: np.ndarray
+    value_targets: np.ndarray
+    policy_targets: np.ndarray
+    rewards: np.ndarray
+    dones: np.ndarray
+    priorities: np.ndarray
+
+    def prefix_padding(self, last, initial_obs, args):
+        if last is None:
+            prefix_obs = initial_obs.reshape(
+                args.local_num_envs, args.num_stacked_frames, args.channels_per_frame, args.obs_resolution, args.obs_resolution
+                )
+            prefix_action = np.zeros((args.local_num_envs, args.num_stacked_frames), dtype=np.float32)
+
+        else:
+            prefix_obs = last.obs[:, -args.num_stacked_frames:, :, :, :]
+            prefix_action = last.actions[:, -args.num_stacked_frames:]
+
+        zeros_priorities = np.zeros_like(prefix_action, dtype=np.float32)
+
+        return self.replace(
+            obs=np.concatenate([prefix_obs, self.obs], axis=1),
+            actions=np.concatenate([prefix_action, self.actions], axis=1),
+            #priorities=np.concatenate([zeros_priorities, self.priorities], axis=1),
+        )
+
+    # TODO: EXTREMELY IMPORTANT
+    # need to use np.where and dones to mask out the values that are not valid
+    def suffix_padding(self, next, args):
+        idx = args.num_unroll_steps + args.td_steps
+        zeros_priorities = np.zeros_like(next.priorities[:, :idx], dtype=np.float32)
+        return self.replace(
+            actions=np.concatenate([self.actions, next.actions[:, :idx]], axis=1),
+            value_targets=np.concatenate([self.value_targets, next.value_targets[:, :idx]], axis=1),
+            policy_targets=np.concatenate([self.policy_targets, next.policy_targets[:, :idx]], axis=1),
+            rewards=np.concatenate([self.rewards, next.rewards[:, :idx]], axis=1),
+            dones=np.concatenate([self.dones, next.dones[:, :idx]], axis=1),
+            #priorities=np.concatenate([self.priorities, zeros_priorities], axis=1),
+        )
 
 def make_rollout_fn(actor_device, applys, args, make_env):
     """
@@ -20,7 +68,37 @@ def make_rollout_fn(actor_device, applys, args, make_env):
     when each inner loop finished the data collected is passed to the queue via the payload variable
     """
 
-    mcts_fn = make_mcts_fn(actor_device, applys, args.num_simulations, args.gamma)
+    mcts_fn = make_mcts_fn(actor_device, applys, args.total_trainsteps, args.num_simulations, args.gamma)
+    compute_value_target = make_compute_value_target(args.num_unroll_steps, args.td_steps, args.gamma)
+
+    @jax.jit
+    def make_rollout(
+        obs: list,
+        actions: list,
+        pred_values: list,
+        mcts_values: list,
+        mcts_policies: list,
+        rewards: list,
+        dones: list
+    ):
+        obs = jnp.asarray(obs).swapaxes(0, 1)
+        actions = jnp.asarray(actions).swapaxes(0, 1)
+        pred_values = jnp.asarray(pred_values).swapaxes(0, 1)
+        mcts_values = jnp.asarray(mcts_values).swapaxes(0, 1)
+        mcts_policies = jnp.asarray(mcts_policies).swapaxes(0, 1)
+        rewards = jnp.asarray(rewards).swapaxes(0, 1)
+        dones = jnp.asarray(dones).swapaxes(0, 1)
+        value_targets = compute_value_target(rewards, pred_values, dones)
+        priorities = jnp.abs(value_targets - pred_values)
+        return Rollout(
+            obs=obs,
+            actions=actions,
+            value_targets=value_targets,
+            policy_targets=mcts_policies,
+            rewards=rewards,
+            dones=dones,
+            priorities=priorities,
+        )
 
     def rollout_fn(
         system: str,
@@ -59,6 +137,7 @@ def make_rollout_fn(actor_device, applys, args, make_env):
             dones = []
             actions = []
             rewards = []
+            pred_values = []
             mcts_values = []
             mcts_policies = []
             truncations = []
@@ -103,11 +182,13 @@ def make_rollout_fn(actor_device, applys, args, make_env):
                 assert action_stack.shape == (args.local_num_envs, args.num_stacked_frames)
 
                 inference_time_start = time.time()
-                action, mcts_value, mcts_policy, key = mcts_fn(params, next_obs, action_stack, key)
-                print(f"Thread {device_thread_id} finished {timestep} in {time.time() - inference_time_start}")
+                action, pred_value, mcts_value, mcts_policy, key = mcts_fn(params, next_obs, action_stack, 0, key)
+                # if timestep % 10 == 0:
+                #     print(f"Thread {device_thread_id} finished {timestep} in {time.time() - inference_time_start}")
                 inference_time += time.time() - inference_time_start
-                
+
                 action = jax.device_get(action)
+                pred_value = jax.device_get(pred_value)
                 mcts_value = jax.device_get(mcts_value)
                 mcts_policies = jax.device_get(mcts_policies)
                 key = jax.device_get(key)
@@ -119,6 +200,7 @@ def make_rollout_fn(actor_device, applys, args, make_env):
                 obs.append(next_obs[:, -args.channels_per_frame:, :, :])
                 dones.append(next_done)
                 actions.append(action)
+                pred_values.append(pred_value)
                 mcts_values.append(mcts_value)
                 mcts_policies.append(mcts_policy)
                 rewards.append(next_reward)
@@ -162,60 +244,25 @@ def make_rollout_fn(actor_device, applys, args, make_env):
             # into single bulk arrays, which later makes transferring the data to the learner's
             # device slightly faster. See https://wandb.ai/costa-huang/cleanRL/reports/data-transfer-optimization--VmlldzozNjU5MTg1
             #if args.learner_device_ids[0] != args.actor_device_ids[0]:
-            current_rollout = format_rollout(
+            current_rollout = make_rollout(
                 obs,
                 actions,
+                pred_values,
                 mcts_values,
                 mcts_policies,
                 rewards,
                 dones
             )
 
-            def prefix_padding(current_rollout, last_rollout, initial_obs, args):
-                # use the last rollout to pad the current rollout
-                if last_rollout is None:
-                    prefix_obs = initial_obs.reshape(
-                        args.local_num_envs, args.num_stacked_frames, args.channels_per_frame, args.obs_resolution, args.obs_resolution
-                        )
-                    prefix_action = np.zeros((args.local_num_envs, args.num_stacked_frames), dtype=np.float32)
-                    
-                else:
-                    prefix_obs = last_rollout.obs[:, -args.num_stacked_frames:, :, :, :]
-                    prefix_action = last_rollout.actions[:, -args.num_stacked_frames:]
-                    
-                return current_rollout.replace(
-                    obs=np.concatenate([prefix_obs, current_rollout.obs], axis=1),
-                    actions=np.concatenate([prefix_action, current_rollout.actions], axis=1),
-                )
-
-            def suffix_padding(current_rollout, last_rollout, args):
-                # use the current rollout to pad the last rollout
-                suffix_index = args.num_unroll_steps + args.td_steps
-                suffix_value = current_rollout.mcts_values[:, :suffix_index]
-                suffix_policies = current_rollout.mcts_policies[:, :suffix_index]
-                suffix_rewards = current_rollout.rewards[:, :suffix_index]
-                suffix_dones = current_rollout.dones[:, :suffix_index]
-                return last_rollout.replace(
-                    mcts_values=np.concatenate([last_rollout.mcts_values, suffix_value], axis=1),
-                    mcts_policies=np.concatenate([last_rollout.mcts_policies, suffix_policies], axis=1),
-                    rewards=np.concatenate([last_rollout.rewards, suffix_rewards], axis=1),
-                    dones=np.concatenate([last_rollout.dones, suffix_dones], axis=1)
-                )
-
-            current_rollout = prefix_padding(current_rollout, last_rollout, initial_obs, args)
+            current_rollout = current_rollout.prefix_padding(last_rollout, initial_obs, args)
             if last_rollout is not None:
-                last_rollout = suffix_padding(current_rollout, last_rollout, args)
+                last_rollout = last_rollout.suffix_padding(current_rollout, args)
                 payload_rollout = last_rollout
 
                 # store data
-                payload = (
-                    global_step,
-                    payload_rollout,
-                    np.mean(params_queue_get_time),
-                )
-                print("payload placed in rollout_queue")
                 rollout_queue_put_time_start = time.time()
-                rollout_queue.put(payload)
+                rollout_queue.put(payload_rollout)
+                print(f"Thread {device_thread_id} placed a batch in queue in {time.time() - update_time_start}")
                 rollout_queue_put_time.append(time.time() - rollout_queue_put_time_start)
                 writer.add_scalar("stats/rollout_queue_put_time", np.mean(rollout_queue_put_time), global_step)
 
@@ -234,51 +281,8 @@ def make_rollout_fn(actor_device, applys, args, make_env):
             )
     return rollout_fn
 
-@struct.dataclass
-class Rollout:
-    obs: np.ndarray
-    actions: np.ndarray
-    mcts_values: np.ndarray
-    mcts_policies: np.ndarray
-    rewards: np.ndarray
-    dones: np.ndarray
-    
-    # TODO: move the padding functions to be methods of this class
 
-@jax.jit
-def format_rollout(
-    obs: list,
-    actions: list,
-    mcts_values: list,
-    mcts_policies: list,
-    rewards: list,
-    dones: list
-):
-    obs = jnp.asarray(obs)
-    actions = jnp.asarray(actions)
-    mcts_values = jnp.asarray(mcts_values)
-    mcts_policies = jnp.asarray(mcts_policies)
-    rewards = jnp.asarray(rewards)
-    dones = jnp.asarray(dones)
-    
-    return Rollout(
-        obs=obs.transpose(1, 0, 2, 3, 4),
-        actions=actions.transpose(1, 0),
-        mcts_values=mcts_values.transpose(1, 0),
-        mcts_policies=mcts_policies.transpose(1, 0, 2),
-        rewards=rewards.transpose(1, 0),
-        dones=dones.transpose(1, 0),
-    )
-
-
-
-#################### rollout ###################
-################################################
-
-################################################
-#################### MCTS ######################
-
-def make_mcts_fn(actor_device, applys, num_simulations, gamma):
+def make_mcts_fn(actor_device, applys, train_steps, num_simulations, gamma):
 
         def recurrent_fn(params, rng, action, prev_embedding):
             embedding, reward, value, policy = applys.recurrent_inference(
@@ -293,7 +297,7 @@ def make_mcts_fn(actor_device, applys, num_simulations, gamma):
             )
             return (output, embedding)
 
-        def mcts(params, observations, actions, rng):
+        def mcts(params, observations, actions, train_step, rng):
             rng, _ = jax.random.split(rng)
             embedding, value, policy = applys.initial_inference(
                 params, observations, actions, scalar=True
@@ -309,24 +313,14 @@ def make_mcts_fn(actor_device, applys, num_simulations, gamma):
                 root=root,
                 recurrent_fn=recurrent_fn,
                 num_simulations=num_simulations,
-                #temperature= # TODO: add temperature function
+                #temperature=softmax_temperature_fn(train_step, train_steps)
             )
-            # TODO: you don't want predicted value you want root values of search tree
-            return output['action'], value, output['action_weights'], rng
+            actions = output['action']
+            pred_value = value
+            node_value = output['search_tree']['node_values'][:, 0]
+            search_policy = output['action_weights']
+            
+            # TODO: need to resolve, do we use node_value or pred_value?
+            return actions, pred_value, node_value, search_policy, rng
  
         return jax.jit(mcts, device=actor_device)
-
-#################### MCTS ######################
-################################################
-
-                # get stacked images and actions
-                # obs.append(next_obs)
-                # if idx == args.async_update:
-                #     stacked_obs = np.asarray(obs).transpose(1, 0, 2, 3, 4)
-                #     stacked_actions = np.asarray([[0]*20]).transpose(1,0)
-                # elif len(actions) > args.num_stacked_frames:
-                #     stacked_obs = np.asarray(obs)[-args.num_stacked_frames].transpose(1, 0, 2, 3, 4)
-                #     stacked_actions = np.asarray(actions)[-args.num_stacked_frames].transpose(1,0)
-                # else:
-                #     stacked_obs = np.asarray(obs).transpose(1, 0, 2, 3, 4)
-                #     stacked_actions = np.asarray(actions).transpose(1,0)

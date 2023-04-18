@@ -13,10 +13,11 @@ import jax.numpy as jnp
          representation_network_input = np.hstack(initial_obs, intial_actions)
     """
 
-def make_single_device_update(applys, optimizer, args, bias_plane_encoding):
-
+def make_single_device_update(applys, optimizer, config):
+    args = config.args
+    
     def softmax_cross_entropy(logits, labels):
-        return -jnp.sum(labels * jax.nn.log_softmax(logits, axis=-1))
+        return -jnp.sum(labels * jax.nn.log_softmax(logits, axis=-1), axis=-1)
 
     # TODO: add in gradient clipping and stuff
     def loss_fn(params, batch):
@@ -24,24 +25,27 @@ def make_single_device_update(applys, optimizer, args, bias_plane_encoding):
         v_loss, p_loss, r_loss = 0, 0, 0
 
         # initial inference
-        shape = batch.observation.shape
-        obs_stack = batch.observation.reshape(-1, args.num_stacked_frames*3, *shape[2:])
-        action_stack = batch.actions[:, :K]
+        obs_stack = batch.observation.reshape((-1, *args.obs_shape))
+        action_stack = batch.actions[:, :-K]
         embedding, value, policy = applys.initial_inference(params, obs_stack, action_stack)
-        v_loss = jnp.add(v_loss, softmax_cross_entropy(value, batch.value[-K]))
-        p_loss = jnp.add(p_loss, softmax_cross_entropy(policy, batch.policy[-K]))
+        v_loss = jnp.add(v_loss, softmax_cross_entropy(value, batch.value[:, -K]))
+        p_loss = jnp.add(p_loss, softmax_cross_entropy(policy, batch.policy[:, -K]))
 
         # unroll model with recurrent inference for K steps
         h_k = embedding
         unroll_actions = batch.actions[:, -K:]
-        for k in range(args.num_unroll_steps):
+        for k in range(K):
             h_kp1, r_k, v_k, p_k  = applys.recurrent_inference(params, h_k, unroll_actions[:, k])
             v_loss = jnp.add(v_loss, softmax_cross_entropy(v_k, batch.value[:, k]))
             p_loss = jnp.add(p_loss, softmax_cross_entropy(p_k, batch.policy[:, k]))
             r_loss = jnp.add(r_loss, softmax_cross_entropy(r_k, batch.reward[:, k]))
             h_k = h_kp1
 
-        loss = v_loss + p_loss + r_loss # TODO: divide by K
+        v_loss = v_loss / K
+        p_loss = p_loss / K
+        r_loss = r_loss / K
+
+        loss = v_loss + p_loss + r_loss
         return loss, (v_loss, p_loss, r_loss)
 
     value_and_grad = jax.value_and_grad(loss_fn, has_aux=True)
@@ -82,7 +86,7 @@ def make_prepare_data_fn(args, learner_devices, scalar_to_categorical):
         rewards = jnp.asarray(rewards, dtype=jnp.float32)
         values = jnp.asarray(values, dtype=jnp.float32)
         dones = jnp.asarray(dones)
-        value_targets = compute_value_target(rewards, values, dones) # TODO: make sure you didn't introduce a bug with reward shapping
+        value_targets = compute_value_target(rewards, values, dones)
         
         rewards = scalar_to_categorical(rewards)    
         value_targets = scalar_to_categorical(value_targets)
