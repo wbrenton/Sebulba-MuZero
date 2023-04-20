@@ -9,14 +9,15 @@ from learner import make_single_device_update
 from network import make_muzero_network, NetworkApplys
 from utils import TrainState
 from replay_buffer import Batch
-from main import parse_args, make_env_helper, MuZeroAtariConfig
+from main import parse_args, MuZeroAtariConfig
+
 
 if __name__ == "__main__":
     args = parse_args()
     args.obs_shape = (96, 84, 84)
     args.num_actions = 4
     config = MuZeroAtariConfig(args)
-    
+
     random.seed(args.seed)
     np.random.seed(args.seed)
     key = jax.random.PRNGKey(args.seed)
@@ -24,11 +25,11 @@ if __name__ == "__main__":
     
     network = make_muzero_network(config)
     applys = NetworkApplys(*network.apply)
-    
+
     init_obs = jnp.zeros((args.local_num_envs,  *args.obs_shape))
     init_action = jnp.zeros((args.local_num_envs, args.num_stacked_frames))
     network_params = network.init(network_key, init_obs, init_action)
-    
+
     optimizer = optax.adam(1e-3)
     opt_state = optimizer.init(network_params)
     

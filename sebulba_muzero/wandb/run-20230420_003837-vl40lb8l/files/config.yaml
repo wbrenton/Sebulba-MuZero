@@ -1,0 +1,164 @@
+wandb_version: 1
+
+exp_name:
+  desc: null
+  value: main
+seed:
+  desc: null
+  value: 1
+save_model:
+  desc: null
+  value: false
+env_id:
+  desc: null
+  value: Breakout-v5
+gray_scale:
+  desc: null
+  value: false
+total_updates:
+  desc: null
+  value: 1000000
+update_frequency:
+  desc: null
+  value: 1000
+local_num_envs:
+  desc: null
+  value: 50
+batch_size:
+  desc: null
+  value: 1024
+learning_rate:
+  desc: null
+  value: 0.001
+weight_decay:
+  desc: null
+  value: 0.001
+num_unroll_steps:
+  desc: null
+  value: 5
+td_steps:
+  desc: null
+  value: 5
+gamma:
+  desc: null
+  value: 0.997
+num_simulations:
+  desc: null
+  value: 50
+support_size:
+  desc: null
+  value: 601
+num_stacked_frames:
+  desc: null
+  value: 32
+obs_resolution:
+  desc: null
+  value: 84
+embedding_resolution:
+  desc: null
+  value: 6
+update_every:
+  desc: null
+  value: 1000
+clip_coef:
+  desc: null
+  value: 0.1
+value_coef:
+  desc: null
+  value: 0.5
+buffer_size:
+  desc: null
+  value: 10
+sequence_length:
+  desc: null
+  value: 200
+actor_device_ids:
+  desc: null
+  value:
+  - 0
+  - 1
+num_actor_threads:
+  desc: null
+  value: 2
+learner_device_ids:
+  desc: null
+  value:
+  - 2
+  - 3
+distributed:
+  desc: null
+  value: false
+profile:
+  desc: null
+  value: false
+test_actor_learner_throughput:
+  desc: null
+  value: false
+track:
+  desc: null
+  value: true
+wandb_project_name:
+  desc: null
+  value: SebulbaMuzero
+wandb_entity:
+  desc: null
+  value: null
+capture_video:
+  desc: null
+  value: false
+num_steps:
+  desc: null
+  value: 200
+channels_per_frame:
+  desc: null
+  value: 3
+world_size:
+  desc: null
+  value: 1
+local_rank:
+  desc: null
+  value: 0
+num_envs:
+  desc: null
+  value: 50
+global_learner_decices:
+  desc: null
+  value:
+  - TPU_2(process=0,(0,1,0,0))
+  - TPU_3(process=0,(1,1,0,0))
+actor_devices:
+  desc: null
+  value:
+  - TPU_0(process=0,(0,0,0,0))
+  - TPU_1(process=0,(1,0,0,0))
+learner_devices:
+  desc: null
+  value:
+  - TPU_2(process=0,(0,1,0,0))
+  - TPU_3(process=0,(1,1,0,0))
+_wandb:
+  desc: null
+  value:
+    code_path: code/sebulba_muzero/main.py
+    python_version: 3.9.5
+    cli_version: 0.14.2
+    framework: keras
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1681951117.82519
+    t:
+      1:
+      - 2
+      - 3
+      - 12
+      - 45
+      - 55
+      3:
+      - 13
+      - 16
+      - 23
+      - 35
+      4: 3.9.5
+      5: 0.14.2
+      8:
+      - 5

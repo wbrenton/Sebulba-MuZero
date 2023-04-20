@@ -55,10 +55,10 @@ def parse_args():
         help="the id of the environment")
     parser.add_argument("--total_updates", type=int, default=1_000_000,
         help="total timesteps of the experiments")
-    parser.add_argument("--local-num-envs", type=int, default=20,
+    parser.add_argument("--update_frequency", type=int, default=1_000,
+        help="frequency to update the actor params with the most recent learner params")
+    parser.add_argument("--local-num-envs", type=int, default=50,
         help="the number of parallel game environments")
-    # parser.add_argument("--num-steps", type=int, default=1000,
-    #     help="the number of steps to run in each environment per rollout")
     parser.add_argument("--batch-size", type=float, default=1024,
         help="Batch size")
     parser.add_argument("--learning-rate", type=float, default=10e-4,
@@ -87,13 +87,13 @@ def parse_args():
         help="the latent representation clipping coefficient")
     parser.add_argument("--value-coef", type=float, default=0.5,
         help="coefficient of the value function")
-    parser.add_argument("--buffer-size", type=float, default=10,
+    parser.add_argument("--buffer-size", type=float, default=10, #50_000
         help="maximum number of sequences in the replay buffer")
-    parser.add_argument("--sequence-length", type=float, default=500,
+    parser.add_argument("--sequence-length", type=float, default=200,
         help="maximum length of a sequence in the replay buffer")
 
     # resource managment
-    parser.add_argument("--actor-device-ids", type=int, nargs="+", default=[0, 1],#, 1],
+    parser.add_argument("--actor-device-ids", type=int, nargs="+", default=[0, 1],
         help="the device ids that actor workers will use (currently only support 1 device)")
     parser.add_argument("--num-actor-threads", type=int, default=2,
         help="the number of actor threads to use per core")
@@ -101,13 +101,23 @@ def parse_args():
         help="the device ids that learner workers will use")
     parser.add_argument("--distributed", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to use `jax.distirbuted`")
-    parser.add_argument("--profile", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+    parser.add_argument("--profile", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True, 
         help="whether to call block_until_ready() for profiling")
     parser.add_argument("--test-actor-learner-throughput", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to test actor-learner throughput by removing the actor-learner communication")
 
+    # wandb
+    parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="if toggled, this experiment will be tracked with Weights and Biases")
+    parser.add_argument("--wandb-project-name", type=str, default="SebulbaMuzero",
+        help="the wandb's project name")
+    parser.add_argument("--wandb-entity", type=str, default=None,
+        help="the entity (team) of wandb's project")
+    parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="whether to capture videos of the agent performances (check out `videos` folder)")
+
     args = parser.parse_args()
-    args.num_steps = args.sequence_length
+    args.num_steps = args.sequence_length # environments are rollouted out for the length of a replay buffer sequence
     args.channels_per_frame = 1 if args.gray_scale else 3
     return args
 
@@ -116,12 +126,6 @@ ATARI_MAX_FRAMES = int(
     108000 / 4 # from cleanba code
 )
 
-# TODO: change this to *args
-def make_env_helper(system, env_id, seed, local_num_envs):
-    if system == "Linux":
-        return make_env(env_id, seed, local_num_envs)
-    else:
-        return nonlinux_make_env(env_id, seed, local_num_envs)
 
 def make_env(env_id, seed, num_envs):
     def thunk():
@@ -147,20 +151,18 @@ def make_env(env_id, seed, num_envs):
 
     return thunk
 
-
 class MuZeroAtariConfig:
     def __init__(self, args):
         self.args = args
         self.scalar_to_categorical, self.categorical_to_scalar = make_categorical_representation_fns(args.support_size)
-        self.tiled_action_encoding_fn, self.bias_plane_action_encoding_fn = make_action_encoding_fn(
+        self.initial_action_encoder, self.recurrent_action_encoder = make_action_encoding_fn(
             args.embedding_resolution, args.obs_resolution, args.num_actions
         )
-
 
 if __name__ == "__main__":
     args = parse_args()
     # TODO: setup jax distributed
-    
+
     args.world_size = jax.process_count()
     args.local_rank = jax.process_index()
     args.num_envs = args.local_num_envs * args.world_size
@@ -185,8 +187,20 @@ if __name__ == "__main__":
     args.global_learner_decices = [str(item) for item in global_learner_decices]
     args.actor_devices = [str(item) for item in actor_devices]
     args.learner_devices = [str(item) for item in learner_devices]
-    
+
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{uuid.uuid4()}"
+    if args.track and args.local_rank == 0:
+        import wandb
+
+        wandb.init(
+            project=args.wandb_project_name,
+            #entity=args.wandb_entity,
+            sync_tensorboard=True,
+            config=vars(args),
+            name=run_name,
+            monitor_gym=True,
+            save_code=True,
+        )
 
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
@@ -201,7 +215,7 @@ if __name__ == "__main__":
     key, network_key, buffer_key = jax.random.split(key, 3)
 
     # env setup
-    envs = make_env_helper(system, args.env_id, args.seed, args.local_num_envs)()
+    envs = make_env(args.env_id, args.seed, args.local_num_envs)()
     args.obs_shape = envs.observation_space.shape
     args.num_actions = envs.single_action_space.n
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
@@ -215,11 +229,11 @@ if __name__ == "__main__":
     init_obs = jnp.zeros((args.local_num_envs,  *args.obs_shape))
     init_action = jnp.zeros((args.local_num_envs, args.num_stacked_frames))
     network_params = network.init(network_key, init_obs, init_action)
-
+ 
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=args.learning_rate,
         peak_value=args.learning_rate,
-        warmup_steps=500,
+        warmup_steps=1,
         decay_steps=args.total_updates,
         end_value=0.0
     )
@@ -247,19 +261,18 @@ if __name__ == "__main__":
     dummy_writer = SimpleNamespace()
     dummy_writer.add_scalar = lambda x,y,z: None
 
-    rollout_queue = queue.Queue(maxsize=args.num_actor_threads * len(args.actor_device_ids))
+    rollout_queue = queue.Queue(maxsize=1000)
     params_queues = []
 
     for d_idx, d_id in enumerate(args.actor_device_ids):
         device_params = jax.device_put(flax.jax_utils.unreplicate(muzero_state.params), local_devices[d_id])
-        rollout_fn = make_rollout_fn(local_devices[d_id], applys, args, make_env_helper)
+        rollout_fn = make_rollout_fn(local_devices[d_id], applys, args, make_env)
         for thread_id in range(args.num_actor_threads):
             params_queue = queue.Queue(maxsize=1)
-            params_queue.put(device_params)
+            params_queue.put((device_params, 0)) # (params, train_step)
             threading.Thread(
                 target=rollout_fn,
                 args=(
-                    system,
                     jax.device_put(key, local_devices[d_id]),
                     args,
                     rollout_queue,
@@ -270,20 +283,21 @@ if __name__ == "__main__":
             ).start()
             params_queues.append(params_queue)
 
-    batch_queue = queue.Queue(maxsize=5) # arbitrary
-    start_replay_buffer_manager(rollout_queue, batch_queue, config) # TODO: may want to include some logging inside this thread to monitor the replay buffer
+    batch_queue = queue.Queue(maxsize=1000) # you want this thread to never block on the put side
+    start_replay_buffer_manager(learner_devices, rollout_queue, batch_queue, config, writer)
 
-    batch_queue_get_time = deque(maxlen=1000) # you want this thread to never block on the put side
+    update_time = deque(maxlen=10)
+    batch_queue_get_time = deque(maxlen=10)
     data_transfer_time = deque(maxlen=10)
     learner_network_version = 0
     while True:
-        update_iteration_start = time.time()
+        update_start_time = time.time()
         learner_network_version += 1
 
         batch_queue_get_start = time.time()
-        (batch, weights, sampled_indicies) = batch_queue.get()
+        batch = batch_queue.get()
         batch_queue_get_time.append(time.time() - batch_queue_get_start)
-        writer.add_scalar("stats/batch_queue_get_time", np.mean(batch_queue_get_time), learner_network_version)
+        writer.add_scalar("stats/learner/batch_queue_get_time", np.mean(batch_queue_get_time), learner_network_version)
 
         device_transfer_start = time.time()
         shard_fn = lambda x: jax.device_put_sharded(
@@ -291,17 +305,25 @@ if __name__ == "__main__":
             learner_devices
         )
         sharded_batch = jax.tree_map(shard_fn, batch)
-        writer.add_scalar("stats/learner/data_transfer_time", time.time() - device_transfer_start, learner_network_version)
+        data_transfer_time.append(time.time() - device_transfer_start)
+        writer.add_scalar("stats/learner/data_transfer_time", np.mean(data_transfer_time), learner_network_version)
 
         training_time_start = time.time()
         muzero_state, loss, v_loss, p_loss, r_loss = multi_device_update(
                 muzero_state, sharded_batch
         )
-        v_loss.block_until_ready()
-        writer.add_scalar("stats/training_time", time.time() - training_time_start, learner_network_version)
-        writer.add_scalar("stats/rollout_queue_size", rollout_queue.qsize(), learner_network_version)
-        writer.add_scalar("stats/batch_queue_size", batch_queue.qsize(), learner_network_version)
-        
+
+        update_time.append(time.time() - update_start_time)
+        writer.add_scalar("stats/learner/update_time", np.mean(update_time), learner_network_version)
+
+        if args.profile:
+            loss.mean().block_until_ready()
+
+        writer.add_scalar("stats/learner/training_time", time.time() - training_time_start, learner_network_version)
+        writer.add_scalar("stats/learner/rollout_queue_size", rollout_queue.qsize(), learner_network_version)
+        writer.add_scalar("stats/learner/batch_queue_size", batch_queue.qsize(), learner_network_version)
+        writer.add_scalar("stats/learner/rollout_queue_size", rollout_queue.qsize(), learner_network_version)
+
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         writer.add_scalar("charts/learning_rate", schedule(learner_network_version).item(), learner_network_version)
         writer.add_scalar("losses/value_loss", np.mean(v_loss).item(), learner_network_version)
@@ -309,19 +331,11 @@ if __name__ == "__main__":
         writer.add_scalar("losses/reward_loss", np.mean(r_loss).item(), learner_network_version)
         writer.add_scalar("losses/loss", np.mean(loss), learner_network_version)
 
-        # writer.add_scalar("stats/training_time", time.time() - training_time_start, global_step)
-        # writer.add_scalar("stats/rollout_queue_size", rollout_queue.qsize(), global_step)
-        # writer.add_scalar("stats/params_queue_size", params_queue.qsize(), global_step)
-        # print(
-        #     global_step,
-        #     f"actor_policy_version={actor_network_version}, learner_policy_version={learner_network_version}, training time: {time.time() - training_time_start}s", # learner_network_version
-        # )
-
-        #writer.add_scalar("charts/learning_rate", muzero.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
         # update network version
-        # if update >= args.num_updates:
-        #     break
-            # for d_idx, d_id in enumerate(args.actor_device_ids):
-            #     device_params = jax.device_put(flax.jax_utils.unreplicate(muzero_state.params), local_devices[d_id])
-            #     for thread_id in range(args.num_actor_threads):
-            #         params_queues[d_idx * args.num_actor_threads + thread_id].put(device_params)
+        if learner_network_version % args.update_frequency == 0 and learner_network_version > 0:
+            params_put_time_start = time.time()
+            for d_idx, d_id in enumerate(args.actor_device_ids):
+                device_params = jax.device_put(flax.jax_utils.unreplicate(muzero_state.params), local_devices[d_id])
+                for thread_id in range(args.num_actor_threads):
+                    params_queues[d_idx * args.num_actor_threads + thread_id].put((device_params, learner_network_version))
+            params_put_time = time.time() - params_put_time_start

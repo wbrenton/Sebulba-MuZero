@@ -1,0 +1,3466 @@
+diff --git a/README.md b/README.md
+index e7aab0b..1ee462b 100644
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,21 @@
+ # Sebulba-MuZero
+ An open source implementation of MuZero using DeepMind's Sebulba Architecture (in development)
++
++
++## Inutition
++
++
++
++### Actor
++The actor process generates rollouts by performing MCTS to take actions and accumulates the experience into lists. When an environment is steped 500 times the lists are converted to arrays and stored in a `Rollout` dataclass. The current rollout and the last rollout are kept in memory so that the last rollout can be used to pad the begining of the current rollout (prefix padding) and the current rollout can be used to pad the end of the last rollout (suffix padding). Once the last rollout has beed padded it is added to the `rollout_queue` where the replay buffer manager's `rollout_queue_to_replay_buffer` thread will add it to the replay buffer.
++
++### Learner
++The learner gets batches from the `batch_queue` and updates the parameters of the network. Every 1,000 steps the learner places the updated parameters in the `params_queue` causing the actor params to be updated when it starts the next rollout.
++
++### Replay Buffer
++The replay buffer is managed via two threads `rollout_queue_to_replay_buffer` and `batch_queue_to_replay_buffer`. 
++
++The former takes rollouts from the `rollout_queue` and creates a list of tuples containing (`GameHistory`, priority) for each game in the batched `Rollout` which is then added to the replay buffer via the `add_games` method.
++
++The latter populates the `batch_queue` by sampling from the replay buffer according to their priorities via the `sample` method. 
++
+diff --git a/replay_buffer.ipynb b/replay_buffer.ipynb
+deleted file mode 100644
+index 9d1bc93..0000000
+--- a/replay_buffer.ipynb
++++ /dev/null
+@@ -1,575 +0,0 @@
+-{
+- "cells": [
+-  {
+-   "cell_type": "code",
+-   "execution_count": 1,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "import jax\n",
+-    "import jax.numpy as jnp\n",
+-    "from flax import struct\n",
+-    "\n",
+-    "from jax.flatten_util import ravel_pytree"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 2,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "@struct.dataclass\n",
+-    "class Trajectory:\n",
+-    "    observation: jnp.ndarray\n",
+-    "    action: jnp.ndarray\n",
+-    "    value_target: jnp.ndarray\n",
+-    "    policy_target: jnp.ndarray\n",
+-    "    reward_target: jnp.ndarray\n",
+-    "    priority: jnp.ndarray"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 15,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "batch = 32\n",
+-    "time = 10\n",
+-    "trajectory = Trajectory(\n",
+-    "    observation= jnp.zeros((batch, 128, 84, 84)),\n",
+-    "    action= jnp.zeros((batch)),\n",
+-    "    value_target=jnp.zeros((batch)),\n",
+-    "    policy_target=jnp.zeros((batch, 4)),\n",
+-    "    reward_target=jnp.zeros((batch)),\n",
+-    "    priority=jnp.zeros((batch))\n",
+-    ")\n"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 28,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "flatten_fn = jax.vmap(lambda x: ravel_pytree(x)[0]) # to be used on a single trajectory\n",
+-    "_, unflatten_fn = ravel_pytree(trajectory)\n",
+-    "unflatten_fn = jax.vmap(unflatten_fn) # to be used on entire replay_buffer"
+-   ]
+-  },
+-  {
+-   "attachments": {},
+-   "cell_type": "markdown",
+-   "metadata": {},
+-   "source": [
+-    "# Try brax uniform sampling buffer with your trajectory to better understand how it works \n",
+-    "# then introduce PER"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": null,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "from typing import Any, Tuple\n",
+-    "from jax.random import PRNGKey\n",
+-    "\n",
+-    "State = Any\n",
+-    "Sample = Any\n",
+-    "\n",
+-    "@struct.dataclass\n",
+-    "class ReplayBufferState:\n",
+-    "  \"\"\"Contains data related to a replay buffer.\"\"\"\n",
+-    "  data: jnp.ndarray\n",
+-    "  current_position: jnp.ndarray\n",
+-    "  current_size: jnp.ndarray\n",
+-    "  key: PRNGKey\n",
+-    "\n",
+-    "class ReplayBuffer:\n",
+-    "  \"\"\"\n",
+-    "  Priotized experience replay buffer.\n",
+-    "  \n",
+-    "  Modified port of brax.training.replay_buffers\n",
+-    "  https://github.com/google/brax/blob/b373f5a45e62189a4a260131c17b10181ccda96a/brax/training/replay_buffers.py\n",
+-    "  \n",
+-    "  \"\"\"\n",
+-    "\n",
+-    "  def __init__(self, max_replay_size: int, dummy_data_sample: Sample,\n",
+-    "               sample_batch_size: int) -> State:\n",
+-    "    \"\"\"Init the replay buffer.\"\"\"\n",
+-    "    self._flatten_fn = jax.vmap(lambda x: ravel_pytree(x)[0])\n",
+-    "\n",
+-    "    dummy_flatten, self._unflatten_fn = ravel_pytree(dummy_data_sample)\n",
+-    "    self._unflatten_fn = jax.vmap(self._unflatten_fn)\n",
+-    "    data_size = len(dummy_flatten)\n",
+-    "\n",
+-    "    self._data_shape = (max_replay_size, data_size)\n",
+-    "    self._data_dtype = dummy_flatten.dtype\n",
+-    "    self._sample_batch_size = sample_batch_size\n",
+-    "    \n",
+-    "  def init(self, key: PRNGKey) -> ReplayBufferState:\n",
+-    "      return ReplayBufferState(\n",
+-    "        data=jnp.zeros(self._data_shape, self._data_dtype),\n",
+-    "        current_size=jnp.zeros((), jnp.int32),\n",
+-    "        current_position=jnp.zeros((), jnp.int32),\n",
+-    "        key=key)\n",
+-    "\n",
+-    "  def insert(self, buffer_state: State, samples: Sample) -> State:\n",
+-    "    \"\"\"Insert data in the replay buffer.\n",
+-    "\n",
+-    "    Args:\n",
+-    "      buffer_state: Buffer state\n",
+-    "      samples: Sample to insert with a leading batch size.\n",
+-    "\n",
+-    "    Returns:\n",
+-    "      New buffer state.\n",
+-    "    \"\"\"\n",
+-    "    if buffer_state.data.shape != self._data_shape:\n",
+-    "      raise ValueError(\n",
+-    "          f'buffer_state.data.shape ({buffer_state.data.shape}) '\n",
+-    "          f'doesn\\'t match the expected value ({self._data_shape})')\n",
+-    "\n",
+-    "    update = self._flatten_fn(samples)\n",
+-    "    data = buffer_state.data\n",
+-    "\n",
+-    "    # Make sure update is not larger than the maximum replay size.\n",
+-    "    if len(update) > len(data):\n",
+-    "      raise ValueError(\n",
+-    "          'Trying to insert a batch of samples larger than the maximum replay '\n",
+-    "          f'size. num_samples: {len(update)}, max replay size {len(data)}')\n",
+-    "\n",
+-    "    # If needed, roll the buffer to make sure there's enough space to fit\n",
+-    "    # `update` after the current position.\n",
+-    "    position = buffer_state.current_position\n",
+-    "    roll = jnp.minimum(0, len(data) - position - len(update))\n",
+-    "    data = jax.lax.cond(roll, lambda: jnp.roll(data, roll, axis=0),\n",
+-    "                        lambda: data)\n",
+-    "    position = position + roll\n",
+-    "\n",
+-    "    # Update the buffer and the control numbers.\n",
+-    "    data = jax.lax.dynamic_update_slice_in_dim(data, update, position, axis=0)\n",
+-    "    position = (position + len(update)) % len(data)\n",
+-    "    size = jnp.minimum(buffer_state.current_size + len(update), len(data))\n",
+-    "\n",
+-    "    return buffer_state.replace(\n",
+-    "        data=data, current_position=position, current_size=size)\n",
+-    "\n",
+-    "  def sample(self, buffer_state: State) -> Tuple[State, Sample]:\n",
+-    "    \"\"\"Sample a batch of data according to prioritized experience replay.\"\"\"\n",
+-    "    \n",
+-    "    \n",
+-    "\n",
+-    "  def size(self, buffer_state: State) -> int:\n",
+-    "    \"\"\"Total amount of elements that are sampleable.\"\"\""
+-   ]
+-  },
+-  {
+-   "attachments": {},
+-   "cell_type": "markdown",
+-   "metadata": {},
+-   "source": [
+-    "# Replay Buffer Logic\n",
+-    "- ReplayBufferState\n",
+-    "    - data : batch of flattened trajectories\n",
+-    "    - current_size: \n",
+-    "    - current_position\n",
+-    "    - key\n",
+-    "\n",
+-    "- Flattening / Unflattening ops\n",
+-    "    - flatten_trajectory: ```vmap(lambda x: ravel_pytree(x)[0])```\n",
+-    "    - unflatten_trajectory: ```dummy_flatten, jax.vmap(self._unflatten_fn) = flatten_util.ravel_pytree(dummy_data_sample) ```"
+-   ]
+-  },
+-  {
+-   "cell_type": "markdown",
+-   "metadata": {},
+-   "source": []
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 33,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "ename": "TypeError",
+-     "evalue": "start_indices arguments to dynamic_slice must be scalars,  got indices (ShapedArray(int32[5]), ShapedArray(int32[]))",
+-     "output_type": "error",
+-     "traceback": [
+-      "\u001b[0;31m---------------------------------------------------------------------------\u001b[0m",
+-      "\u001b[0;31mTypeError\u001b[0m                                 Traceback (most recent call last)",
+-      "Cell \u001b[0;32mIn[33], line 4\u001b[0m\n\u001b[1;32m      1\u001b[0m \u001b[39m# example of how to use dynamic slice in dim\u001b[39;00m\n\u001b[1;32m      3\u001b[0m arr \u001b[39m=\u001b[39m jnp\u001b[39m.\u001b[39marange(\u001b[39m20\u001b[39m)\u001b[39m.\u001b[39mreshape((\u001b[39m5\u001b[39m, \u001b[39m4\u001b[39m))\n\u001b[0;32m----> 4\u001b[0m test \u001b[39m=\u001b[39m jax\u001b[39m.\u001b[39;49mlax\u001b[39m.\u001b[39;49mdynamic_slice_in_dim(arr, jnp\u001b[39m.\u001b[39;49marray([\u001b[39m1\u001b[39;49m, \u001b[39m2\u001b[39;49m, \u001b[39m3\u001b[39;49m, \u001b[39m4\u001b[39;49m, \u001b[39m5\u001b[39;49m]), \u001b[39m1\u001b[39;49m, axis\u001b[39m=\u001b[39;49m\u001b[39m0\u001b[39;49m)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/lax/slicing.py:691\u001b[0m, in \u001b[0;36mdynamic_slice_in_dim\u001b[0;34m(operand, start_index, slice_size, axis)\u001b[0m\n\u001b[1;32m    689\u001b[0m start_indices[axis] \u001b[39m=\u001b[39m start_index\n\u001b[1;32m    690\u001b[0m slice_sizes[axis] \u001b[39m=\u001b[39m core\u001b[39m.\u001b[39m_canonicalize_dimension(slice_size)\n\u001b[0;32m--> 691\u001b[0m \u001b[39mreturn\u001b[39;00m dynamic_slice(operand, start_indices, slice_sizes)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/lax/slicing.py:105\u001b[0m, in \u001b[0;36mdynamic_slice\u001b[0;34m(operand, start_indices, slice_sizes)\u001b[0m\n\u001b[1;32m    103\u001b[0m   dynamic_sizes \u001b[39m=\u001b[39m []\n\u001b[1;32m    104\u001b[0m   static_sizes \u001b[39m=\u001b[39m core\u001b[39m.\u001b[39mcanonicalize_shape(slice_sizes)  \u001b[39m# type: ignore\u001b[39;00m\n\u001b[0;32m--> 105\u001b[0m \u001b[39mreturn\u001b[39;00m dynamic_slice_p\u001b[39m.\u001b[39;49mbind(operand, \u001b[39m*\u001b[39;49mstart_indices, \u001b[39m*\u001b[39;49mdynamic_sizes,\n\u001b[1;32m    106\u001b[0m                             slice_sizes\u001b[39m=\u001b[39;49m\u001b[39mtuple\u001b[39;49m(static_sizes))\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/core.py:343\u001b[0m, in \u001b[0;36mPrimitive.bind\u001b[0;34m(self, *args, **params)\u001b[0m\n\u001b[1;32m    340\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mbind\u001b[39m(\u001b[39mself\u001b[39m, \u001b[39m*\u001b[39margs, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mparams):\n\u001b[1;32m    341\u001b[0m   \u001b[39massert\u001b[39;00m (\u001b[39mnot\u001b[39;00m config\u001b[39m.\u001b[39mjax_enable_checks \u001b[39mor\u001b[39;00m\n\u001b[1;32m    342\u001b[0m           \u001b[39mall\u001b[39m(\u001b[39misinstance\u001b[39m(arg, Tracer) \u001b[39mor\u001b[39;00m valid_jaxtype(arg) \u001b[39mfor\u001b[39;00m arg \u001b[39min\u001b[39;00m args)), args\n\u001b[0;32m--> 343\u001b[0m   \u001b[39mreturn\u001b[39;00m \u001b[39mself\u001b[39;49m\u001b[39m.\u001b[39;49mbind_with_trace(find_top_trace(args), args, params)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/core.py:346\u001b[0m, in \u001b[0;36mPrimitive.bind_with_trace\u001b[0;34m(self, trace, args, params)\u001b[0m\n\u001b[1;32m    345\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mbind_with_trace\u001b[39m(\u001b[39mself\u001b[39m, trace, args, params):\n\u001b[0;32m--> 346\u001b[0m   out \u001b[39m=\u001b[39m trace\u001b[39m.\u001b[39;49mprocess_primitive(\u001b[39mself\u001b[39;49m, \u001b[39mmap\u001b[39;49m(trace\u001b[39m.\u001b[39;49mfull_raise, args), params)\n\u001b[1;32m    347\u001b[0m   \u001b[39mreturn\u001b[39;00m \u001b[39mmap\u001b[39m(full_lower, out) \u001b[39mif\u001b[39;00m \u001b[39mself\u001b[39m\u001b[39m.\u001b[39mmultiple_results \u001b[39melse\u001b[39;00m full_lower(out)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/core.py:728\u001b[0m, in \u001b[0;36mEvalTrace.process_primitive\u001b[0;34m(self, primitive, tracers, params)\u001b[0m\n\u001b[1;32m    727\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mprocess_primitive\u001b[39m(\u001b[39mself\u001b[39m, primitive, tracers, params):\n\u001b[0;32m--> 728\u001b[0m   \u001b[39mreturn\u001b[39;00m primitive\u001b[39m.\u001b[39;49mimpl(\u001b[39m*\u001b[39;49mtracers, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mparams)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/dispatch.py:122\u001b[0m, in \u001b[0;36mapply_primitive\u001b[0;34m(prim, *args, **params)\u001b[0m\n\u001b[1;32m    120\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mapply_primitive\u001b[39m(prim, \u001b[39m*\u001b[39margs, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mparams):\n\u001b[1;32m    121\u001b[0m \u001b[39m  \u001b[39m\u001b[39m\"\"\"Impl rule that compiles and runs a single primitive 'prim' using XLA.\"\"\"\u001b[39;00m\n\u001b[0;32m--> 122\u001b[0m   compiled_fun \u001b[39m=\u001b[39m xla_primitive_callable(prim, \u001b[39m*\u001b[39;49munsafe_map(arg_spec, args),\n\u001b[1;32m    123\u001b[0m                                         \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mparams)\n\u001b[1;32m    124\u001b[0m   \u001b[39mreturn\u001b[39;00m compiled_fun(\u001b[39m*\u001b[39margs)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/util.py:253\u001b[0m, in \u001b[0;36mcache.<locals>.wrap.<locals>.wrapper\u001b[0;34m(*args, **kwargs)\u001b[0m\n\u001b[1;32m    251\u001b[0m   \u001b[39mreturn\u001b[39;00m f(\u001b[39m*\u001b[39margs, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mkwargs)\n\u001b[1;32m    252\u001b[0m \u001b[39melse\u001b[39;00m:\n\u001b[0;32m--> 253\u001b[0m   \u001b[39mreturn\u001b[39;00m cached(config\u001b[39m.\u001b[39;49m_trace_context(), \u001b[39m*\u001b[39;49margs, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mkwargs)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/util.py:246\u001b[0m, in \u001b[0;36mcache.<locals>.wrap.<locals>.cached\u001b[0;34m(_, *args, **kwargs)\u001b[0m\n\u001b[1;32m    244\u001b[0m \u001b[39m@functools\u001b[39m\u001b[39m.\u001b[39mlru_cache(max_size)\n\u001b[1;32m    245\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mcached\u001b[39m(_, \u001b[39m*\u001b[39margs, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mkwargs):\n\u001b[0;32m--> 246\u001b[0m   \u001b[39mreturn\u001b[39;00m f(\u001b[39m*\u001b[39;49margs, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mkwargs)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/dispatch.py:201\u001b[0m, in \u001b[0;36mxla_primitive_callable\u001b[0;34m(prim, *arg_specs, **params)\u001b[0m\n\u001b[1;32m    199\u001b[0m   \u001b[39melse\u001b[39;00m:\n\u001b[1;32m    200\u001b[0m     \u001b[39mreturn\u001b[39;00m out,\n\u001b[0;32m--> 201\u001b[0m compiled \u001b[39m=\u001b[39m _xla_callable_uncached(lu\u001b[39m.\u001b[39;49mwrap_init(prim_fun), device, \u001b[39mNone\u001b[39;49;00m,\n\u001b[1;32m    202\u001b[0m                                   prim\u001b[39m.\u001b[39;49mname, donated_invars, \u001b[39mFalse\u001b[39;49;00m, \u001b[39m*\u001b[39;49marg_specs)\n\u001b[1;32m    203\u001b[0m \u001b[39mif\u001b[39;00m \u001b[39mnot\u001b[39;00m prim\u001b[39m.\u001b[39mmultiple_results:\n\u001b[1;32m    204\u001b[0m   \u001b[39mreturn\u001b[39;00m \u001b[39mlambda\u001b[39;00m \u001b[39m*\u001b[39margs, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mkw: compiled(\u001b[39m*\u001b[39margs, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mkw)[\u001b[39m0\u001b[39m]\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/dispatch.py:351\u001b[0m, in \u001b[0;36m_xla_callable_uncached\u001b[0;34m(fun, device, backend, name, donated_invars, keep_unused, *arg_specs)\u001b[0m\n\u001b[1;32m    348\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39m_xla_callable_uncached\u001b[39m(fun: lu\u001b[39m.\u001b[39mWrappedFun, device, backend, name,\n\u001b[1;32m    349\u001b[0m                            donated_invars, keep_unused, \u001b[39m*\u001b[39marg_specs):\n\u001b[1;32m    350\u001b[0m   \u001b[39mif\u001b[39;00m config\u001b[39m.\u001b[39mjax_array:\n\u001b[0;32m--> 351\u001b[0m     computation \u001b[39m=\u001b[39m sharded_lowering(fun, device, backend, name, donated_invars,\n\u001b[1;32m    352\u001b[0m                                    \u001b[39mFalse\u001b[39;49;00m, keep_unused, \u001b[39m*\u001b[39;49marg_specs)\n\u001b[1;32m    353\u001b[0m     allow_prop \u001b[39m=\u001b[39m [\u001b[39mTrue\u001b[39;00m] \u001b[39m*\u001b[39m \u001b[39mlen\u001b[39m(computation\u001b[39m.\u001b[39mcompile_args[\u001b[39m'\u001b[39m\u001b[39mglobal_out_avals\u001b[39m\u001b[39m'\u001b[39m])\n\u001b[1;32m    354\u001b[0m     \u001b[39mreturn\u001b[39;00m computation\u001b[39m.\u001b[39mcompile(_allow_propagation_to_outputs\u001b[39m=\u001b[39mallow_prop)\u001b[39m.\u001b[39munsafe_call\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/dispatch.py:342\u001b[0m, in \u001b[0;36msharded_lowering\u001b[0;34m(fun, device, backend, name, donated_invars, always_lower, keep_unused, *arg_specs)\u001b[0m\n\u001b[1;32m    337\u001b[0m in_shardings \u001b[39m=\u001b[39m [pxla\u001b[39m.\u001b[39m_UNSPECIFIED \u001b[39mif\u001b[39;00m i \u001b[39mis\u001b[39;00m \u001b[39mNone\u001b[39;00m \u001b[39melse\u001b[39;00m i \u001b[39mfor\u001b[39;00m i \u001b[39min\u001b[39;00m in_shardings]\n\u001b[1;32m    339\u001b[0m \u001b[39m# Pass in a singleton `_UNSPECIFIED` for out_shardings because we don't know\u001b[39;00m\n\u001b[1;32m    340\u001b[0m \u001b[39m# the number of output avals at this stage. lower_sharding_computation will\u001b[39;00m\n\u001b[1;32m    341\u001b[0m \u001b[39m# apply it to all out_avals.\u001b[39;00m\n\u001b[0;32m--> 342\u001b[0m \u001b[39mreturn\u001b[39;00m pxla\u001b[39m.\u001b[39;49mlower_sharding_computation(\n\u001b[1;32m    343\u001b[0m     fun, \u001b[39m'\u001b[39;49m\u001b[39mjit\u001b[39;49m\u001b[39m'\u001b[39;49m, name, in_shardings, pxla\u001b[39m.\u001b[39;49m_UNSPECIFIED, donated_invars,\n\u001b[1;32m    344\u001b[0m     in_avals, in_is_global\u001b[39m=\u001b[39;49m(\u001b[39mTrue\u001b[39;49;00m,) \u001b[39m*\u001b[39;49m \u001b[39mlen\u001b[39;49m(arg_specs), keep_unused\u001b[39m=\u001b[39;49mkeep_unused,\n\u001b[1;32m    345\u001b[0m     always_lower\u001b[39m=\u001b[39;49malways_lower, devices_from_context\u001b[39m=\u001b[39;49mda)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/profiler.py:314\u001b[0m, in \u001b[0;36mannotate_function.<locals>.wrapper\u001b[0;34m(*args, **kwargs)\u001b[0m\n\u001b[1;32m    311\u001b[0m \u001b[39m@wraps\u001b[39m(func)\n\u001b[1;32m    312\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mwrapper\u001b[39m(\u001b[39m*\u001b[39margs, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mkwargs):\n\u001b[1;32m    313\u001b[0m   \u001b[39mwith\u001b[39;00m TraceAnnotation(name, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mdecorator_kwargs):\n\u001b[0;32m--> 314\u001b[0m     \u001b[39mreturn\u001b[39;00m func(\u001b[39m*\u001b[39;49margs, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mkwargs)\n\u001b[1;32m    315\u001b[0m   \u001b[39mreturn\u001b[39;00m wrapper\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/interpreters/pxla.py:2797\u001b[0m, in \u001b[0;36mlower_sharding_computation\u001b[0;34m(fun, api_name, fun_name, in_shardings, out_shardings, donated_invars, global_in_avals, in_is_global, keep_unused, always_lower, devices_from_context)\u001b[0m\n\u001b[1;32m   2792\u001b[0m name_stack \u001b[39m=\u001b[39m new_name_stack(wrap_name(fun_name, api_name))\n\u001b[1;32m   2794\u001b[0m \u001b[39mwith\u001b[39;00m dispatch\u001b[39m.\u001b[39mlog_elapsed_time(\u001b[39mf\u001b[39m\u001b[39m\"\u001b[39m\u001b[39mFinished tracing + transforming \u001b[39m\u001b[39m{\u001b[39;00mname_stack\u001b[39m}\u001b[39;00m\u001b[39m \u001b[39m\u001b[39m\"\u001b[39m\n\u001b[1;32m   2795\u001b[0m                                \u001b[39m\"\u001b[39m\u001b[39min \u001b[39m\u001b[39m{elapsed_time}\u001b[39;00m\u001b[39m sec\u001b[39m\u001b[39m\"\u001b[39m,\n\u001b[1;32m   2796\u001b[0m                                event\u001b[39m=\u001b[39mdispatch\u001b[39m.\u001b[39mJAXPR_TRACE_EVENT):\n\u001b[0;32m-> 2797\u001b[0m   jaxpr, global_out_avals, consts \u001b[39m=\u001b[39m pe\u001b[39m.\u001b[39;49mtrace_to_jaxpr_final(\n\u001b[1;32m   2798\u001b[0m       fun, global_in_avals, debug_info\u001b[39m=\u001b[39;49mpe\u001b[39m.\u001b[39;49mdebug_info_final(fun, api_name))\n\u001b[1;32m   2799\u001b[0m kept_outputs \u001b[39m=\u001b[39m [\u001b[39mTrue\u001b[39;00m] \u001b[39m*\u001b[39m \u001b[39mlen\u001b[39m(global_out_avals)\n\u001b[1;32m   2801\u001b[0m \u001b[39mif\u001b[39;00m _is_unspecified(out_shardings):\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/profiler.py:314\u001b[0m, in \u001b[0;36mannotate_function.<locals>.wrapper\u001b[0;34m(*args, **kwargs)\u001b[0m\n\u001b[1;32m    311\u001b[0m \u001b[39m@wraps\u001b[39m(func)\n\u001b[1;32m    312\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mwrapper\u001b[39m(\u001b[39m*\u001b[39margs, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mkwargs):\n\u001b[1;32m    313\u001b[0m   \u001b[39mwith\u001b[39;00m TraceAnnotation(name, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mdecorator_kwargs):\n\u001b[0;32m--> 314\u001b[0m     \u001b[39mreturn\u001b[39;00m func(\u001b[39m*\u001b[39;49margs, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mkwargs)\n\u001b[1;32m    315\u001b[0m   \u001b[39mreturn\u001b[39;00m wrapper\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/interpreters/partial_eval.py:2073\u001b[0m, in \u001b[0;36mtrace_to_jaxpr_final\u001b[0;34m(fun, in_avals, debug_info, keep_inputs)\u001b[0m\n\u001b[1;32m   2071\u001b[0m   main\u001b[39m.\u001b[39mjaxpr_stack \u001b[39m=\u001b[39m ()  \u001b[39m# type: ignore\u001b[39;00m\n\u001b[1;32m   2072\u001b[0m   \u001b[39mwith\u001b[39;00m core\u001b[39m.\u001b[39mnew_sublevel():\n\u001b[0;32m-> 2073\u001b[0m     jaxpr, out_avals, consts \u001b[39m=\u001b[39m trace_to_subjaxpr_dynamic(\n\u001b[1;32m   2074\u001b[0m       fun, main, in_avals, keep_inputs\u001b[39m=\u001b[39;49mkeep_inputs, debug_info\u001b[39m=\u001b[39;49mdebug_info)\n\u001b[1;32m   2075\u001b[0m   \u001b[39mdel\u001b[39;00m fun, main\n\u001b[1;32m   2076\u001b[0m \u001b[39mreturn\u001b[39;00m jaxpr, out_avals, consts\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/interpreters/partial_eval.py:2006\u001b[0m, in \u001b[0;36mtrace_to_subjaxpr_dynamic\u001b[0;34m(fun, main, in_avals, keep_inputs, debug_info)\u001b[0m\n\u001b[1;32m   2004\u001b[0m in_tracers \u001b[39m=\u001b[39m _input_type_to_tracers(trace\u001b[39m.\u001b[39mnew_arg, in_avals)\n\u001b[1;32m   2005\u001b[0m in_tracers_ \u001b[39m=\u001b[39m [t \u001b[39mfor\u001b[39;00m t, keep \u001b[39min\u001b[39;00m \u001b[39mzip\u001b[39m(in_tracers, keep_inputs) \u001b[39mif\u001b[39;00m keep]\n\u001b[0;32m-> 2006\u001b[0m ans \u001b[39m=\u001b[39m fun\u001b[39m.\u001b[39;49mcall_wrapped(\u001b[39m*\u001b[39;49min_tracers_)\n\u001b[1;32m   2007\u001b[0m out_tracers \u001b[39m=\u001b[39m \u001b[39mmap\u001b[39m(trace\u001b[39m.\u001b[39mfull_raise, ans)\n\u001b[1;32m   2008\u001b[0m jaxpr, consts \u001b[39m=\u001b[39m frame\u001b[39m.\u001b[39mto_jaxpr(out_tracers)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/linear_util.py:165\u001b[0m, in \u001b[0;36mWrappedFun.call_wrapped\u001b[0;34m(self, *args, **kwargs)\u001b[0m\n\u001b[1;32m    162\u001b[0m gen \u001b[39m=\u001b[39m gen_static_args \u001b[39m=\u001b[39m out_store \u001b[39m=\u001b[39m \u001b[39mNone\u001b[39;00m\n\u001b[1;32m    164\u001b[0m \u001b[39mtry\u001b[39;00m:\n\u001b[0;32m--> 165\u001b[0m   ans \u001b[39m=\u001b[39m \u001b[39mself\u001b[39;49m\u001b[39m.\u001b[39;49mf(\u001b[39m*\u001b[39;49margs, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49m\u001b[39mdict\u001b[39;49m(\u001b[39mself\u001b[39;49m\u001b[39m.\u001b[39;49mparams, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mkwargs))\n\u001b[1;32m    166\u001b[0m \u001b[39mexcept\u001b[39;00m:\n\u001b[1;32m    167\u001b[0m   \u001b[39m# Some transformations yield from inside context managers, so we have to\u001b[39;00m\n\u001b[1;32m    168\u001b[0m   \u001b[39m# interrupt them before reraising the exception. Otherwise they will only\u001b[39;00m\n\u001b[1;32m    169\u001b[0m   \u001b[39m# get garbage-collected at some later time, running their cleanup tasks\u001b[39;00m\n\u001b[1;32m    170\u001b[0m   \u001b[39m# only after this exception is handled, which can corrupt the global\u001b[39;00m\n\u001b[1;32m    171\u001b[0m   \u001b[39m# state.\u001b[39;00m\n\u001b[1;32m    172\u001b[0m   \u001b[39mwhile\u001b[39;00m stack:\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/dispatch.py:196\u001b[0m, in \u001b[0;36mxla_primitive_callable.<locals>.prim_fun\u001b[0;34m(*args)\u001b[0m\n\u001b[1;32m    195\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mprim_fun\u001b[39m(\u001b[39m*\u001b[39margs):\n\u001b[0;32m--> 196\u001b[0m   out \u001b[39m=\u001b[39m prim\u001b[39m.\u001b[39;49mbind(\u001b[39m*\u001b[39;49margs, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mparams)\n\u001b[1;32m    197\u001b[0m   \u001b[39mif\u001b[39;00m prim\u001b[39m.\u001b[39mmultiple_results:\n\u001b[1;32m    198\u001b[0m     \u001b[39mreturn\u001b[39;00m out\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/core.py:343\u001b[0m, in \u001b[0;36mPrimitive.bind\u001b[0;34m(self, *args, **params)\u001b[0m\n\u001b[1;32m    340\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mbind\u001b[39m(\u001b[39mself\u001b[39m, \u001b[39m*\u001b[39margs, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mparams):\n\u001b[1;32m    341\u001b[0m   \u001b[39massert\u001b[39;00m (\u001b[39mnot\u001b[39;00m config\u001b[39m.\u001b[39mjax_enable_checks \u001b[39mor\u001b[39;00m\n\u001b[1;32m    342\u001b[0m           \u001b[39mall\u001b[39m(\u001b[39misinstance\u001b[39m(arg, Tracer) \u001b[39mor\u001b[39;00m valid_jaxtype(arg) \u001b[39mfor\u001b[39;00m arg \u001b[39min\u001b[39;00m args)), args\n\u001b[0;32m--> 343\u001b[0m   \u001b[39mreturn\u001b[39;00m \u001b[39mself\u001b[39;49m\u001b[39m.\u001b[39;49mbind_with_trace(find_top_trace(args), args, params)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/core.py:346\u001b[0m, in \u001b[0;36mPrimitive.bind_with_trace\u001b[0;34m(self, trace, args, params)\u001b[0m\n\u001b[1;32m    345\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mbind_with_trace\u001b[39m(\u001b[39mself\u001b[39m, trace, args, params):\n\u001b[0;32m--> 346\u001b[0m   out \u001b[39m=\u001b[39m trace\u001b[39m.\u001b[39;49mprocess_primitive(\u001b[39mself\u001b[39;49m, \u001b[39mmap\u001b[39;49m(trace\u001b[39m.\u001b[39;49mfull_raise, args), params)\n\u001b[1;32m    347\u001b[0m   \u001b[39mreturn\u001b[39;00m \u001b[39mmap\u001b[39m(full_lower, out) \u001b[39mif\u001b[39;00m \u001b[39mself\u001b[39m\u001b[39m.\u001b[39mmultiple_results \u001b[39melse\u001b[39;00m full_lower(out)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/interpreters/partial_eval.py:1720\u001b[0m, in \u001b[0;36mDynamicJaxprTrace.process_primitive\u001b[0;34m(self, primitive, tracers, params)\u001b[0m\n\u001b[1;32m   1718\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mprocess_primitive\u001b[39m(\u001b[39mself\u001b[39m, primitive, tracers, params):\n\u001b[1;32m   1719\u001b[0m   \u001b[39mif\u001b[39;00m primitive \u001b[39min\u001b[39;00m custom_staging_rules:\n\u001b[0;32m-> 1720\u001b[0m     \u001b[39mreturn\u001b[39;00m custom_staging_rules[primitive](\u001b[39mself\u001b[39;49m, \u001b[39m*\u001b[39;49mtracers, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mparams)\n\u001b[1;32m   1721\u001b[0m   \u001b[39mreturn\u001b[39;00m \u001b[39mself\u001b[39m\u001b[39m.\u001b[39mdefault_process_primitive(primitive, tracers, params)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/lax/slicing.py:901\u001b[0m, in \u001b[0;36m_dynamic_slice_staging_rule\u001b[0;34m(trace, x, slice_sizes, *starts_and_dyn_sizes)\u001b[0m\n\u001b[1;32m    899\u001b[0m start_indices, dyn \u001b[39m=\u001b[39m util\u001b[39m.\u001b[39msplit_list(starts_and_dyn_sizes, [x\u001b[39m.\u001b[39mndim])\n\u001b[1;32m    900\u001b[0m \u001b[39mif\u001b[39;00m \u001b[39mnot\u001b[39;00m dyn:\n\u001b[0;32m--> 901\u001b[0m   \u001b[39mreturn\u001b[39;00m trace\u001b[39m.\u001b[39;49mdefault_process_primitive(dynamic_slice_p, (x, \u001b[39m*\u001b[39;49mstart_indices),\n\u001b[1;32m    902\u001b[0m                                          \u001b[39mdict\u001b[39;49m(slice_sizes\u001b[39m=\u001b[39;49mslice_sizes))\n\u001b[1;32m    903\u001b[0m shape \u001b[39m=\u001b[39m lax\u001b[39m.\u001b[39m_merge_dyn_shape(slice_sizes, dyn)\n\u001b[1;32m    904\u001b[0m aval \u001b[39m=\u001b[39m core\u001b[39m.\u001b[39mDShapedArray(shape, x\u001b[39m.\u001b[39mdtype, \u001b[39mFalse\u001b[39;00m)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/interpreters/partial_eval.py:1725\u001b[0m, in \u001b[0;36mDynamicJaxprTrace.default_process_primitive\u001b[0;34m(self, primitive, tracers, params)\u001b[0m\n\u001b[1;32m   1723\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mdefault_process_primitive\u001b[39m(\u001b[39mself\u001b[39m, primitive, tracers, params):\n\u001b[1;32m   1724\u001b[0m   avals \u001b[39m=\u001b[39m [t\u001b[39m.\u001b[39maval \u001b[39mfor\u001b[39;00m t \u001b[39min\u001b[39;00m tracers]\n\u001b[0;32m-> 1725\u001b[0m   out_avals, effects \u001b[39m=\u001b[39m primitive\u001b[39m.\u001b[39;49mabstract_eval(\u001b[39m*\u001b[39;49mavals, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mparams)\n\u001b[1;32m   1726\u001b[0m   out_avals \u001b[39m=\u001b[39m [out_avals] \u001b[39mif\u001b[39;00m \u001b[39mnot\u001b[39;00m primitive\u001b[39m.\u001b[39mmultiple_results \u001b[39melse\u001b[39;00m out_avals\n\u001b[1;32m   1727\u001b[0m   source_info \u001b[39m=\u001b[39m source_info_util\u001b[39m.\u001b[39mcurrent()\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/core.py:379\u001b[0m, in \u001b[0;36m_effect_free_abstract_eval.<locals>.abstract_eval_\u001b[0;34m(*args, **kwargs)\u001b[0m\n\u001b[1;32m    378\u001b[0m \u001b[39mdef\u001b[39;00m \u001b[39mabstract_eval_\u001b[39m(\u001b[39m*\u001b[39margs, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mkwargs):\n\u001b[0;32m--> 379\u001b[0m   \u001b[39mreturn\u001b[39;00m abstract_eval(\u001b[39m*\u001b[39;49margs, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mkwargs), no_effects\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/lax/utils.py:66\u001b[0m, in \u001b[0;36mstandard_abstract_eval\u001b[0;34m(prim, shape_rule, dtype_rule, weak_type_rule, named_shape_rule, *avals, **kwargs)\u001b[0m\n\u001b[1;32m     64\u001b[0m   \u001b[39mreturn\u001b[39;00m core\u001b[39m.\u001b[39mConcreteArray(out\u001b[39m.\u001b[39mdtype, out, weak_type\u001b[39m=\u001b[39mweak_type)\n\u001b[1;32m     65\u001b[0m \u001b[39melif\u001b[39;00m least_specialized \u001b[39mis\u001b[39;00m core\u001b[39m.\u001b[39mShapedArray:\n\u001b[0;32m---> 66\u001b[0m   \u001b[39mreturn\u001b[39;00m core\u001b[39m.\u001b[39mShapedArray(shape_rule(\u001b[39m*\u001b[39;49mavals, \u001b[39m*\u001b[39;49m\u001b[39m*\u001b[39;49mkwargs),\n\u001b[1;32m     67\u001b[0m                           dtype_rule(\u001b[39m*\u001b[39mavals, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mkwargs), weak_type\u001b[39m=\u001b[39mweak_type,\n\u001b[1;32m     68\u001b[0m                           named_shape\u001b[39m=\u001b[39mnamed_shape_rule(\u001b[39m*\u001b[39mavals, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mkwargs))\n\u001b[1;32m     69\u001b[0m \u001b[39melif\u001b[39;00m least_specialized \u001b[39mis\u001b[39;00m core\u001b[39m.\u001b[39mDShapedArray:\n\u001b[1;32m     70\u001b[0m   shape \u001b[39m=\u001b[39m shape_rule(\u001b[39m*\u001b[39mavals, \u001b[39m*\u001b[39m\u001b[39m*\u001b[39mkwargs)\n",
+-      "File \u001b[0;32m~/opt/anaconda3/envs/brax/lib/python3.9/site-packages/jax/_src/lax/slicing.py:836\u001b[0m, in \u001b[0;36m_dynamic_slice_shape_rule\u001b[0;34m(operand, slice_sizes, *start_indices)\u001b[0m\n\u001b[1;32m    834\u001b[0m   \u001b[39mraise\u001b[39;00m \u001b[39mTypeError\u001b[39;00m(msg\u001b[39m.\u001b[39mformat(slice_sizes))\n\u001b[1;32m    835\u001b[0m \u001b[39mif\u001b[39;00m \u001b[39many\u001b[39m(idx\u001b[39m.\u001b[39mndim \u001b[39m!=\u001b[39m \u001b[39m0\u001b[39m \u001b[39mfor\u001b[39;00m idx \u001b[39min\u001b[39;00m start_indices):\n\u001b[0;32m--> 836\u001b[0m   \u001b[39mraise\u001b[39;00m \u001b[39mTypeError\u001b[39;00m(\u001b[39m\"\u001b[39m\u001b[39mstart_indices arguments to dynamic_slice must be scalars, \u001b[39m\u001b[39m\"\u001b[39m\n\u001b[1;32m    837\u001b[0m                   \u001b[39mf\u001b[39m\u001b[39m\"\u001b[39m\u001b[39m got indices \u001b[39m\u001b[39m{\u001b[39;00mstart_indices\u001b[39m}\u001b[39;00m\u001b[39m\"\u001b[39m)\n\u001b[1;32m    838\u001b[0m \u001b[39mreturn\u001b[39;00m \u001b[39mtuple\u001b[39m(slice_sizes)\n",
+-      "\u001b[0;31mTypeError\u001b[0m: start_indices arguments to dynamic_slice must be scalars,  got indices (ShapedArray(int32[5]), ShapedArray(int32[]))"
+-     ]
+-    }
+-   ],
+-   "source": [
+-    "# example of how to use dynamic slice in dim\n",
+-    "\n",
+-    "arr = jnp.arange(20).reshape((5, 4))\n",
+-    "test = jax.lax.dynamic_slice_in_dim(arr, jnp.array([1, 2, 3, 4, 5]), 1, axis=0)"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 3,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "name": "stdout",
+-     "output_type": "stream",
+-     "text": [
+-      "Collecting zstandard\n",
+-      "  Downloading zstandard-0.20.0-cp39-cp39-macosx_10_9_x86_64.whl (456 kB)\n",
+-      "\u001b[2K     \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m456.0/456.0 kB\u001b[0m \u001b[31m2.1 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m00:01\u001b[0m00:01\u001b[0m\n",
+-      "\u001b[?25hInstalling collected packages: zstandard\n",
+-      "Successfully installed zstandard-0.20.0\n"
+-     ]
+-    }
+-   ],
+-   "source": [
+-    "!pip install zstandard"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 24,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "name": "stdout",
+-     "output_type": "stream",
+-     "text": [
+-      "Data size: 11360289 bytes\n",
+-      "Compressed data size: 400 bytes\n"
+-     ]
+-    }
+-   ],
+-   "source": [
+-    "import zlib\n",
+-    "import zstandard as zstd\n",
+-    "import numpy as np\n",
+-    "import sys\n",
+-    "\n",
+-    "# Create some sample data to compress\n",
+-    "data = np.zeros((128, 3, 86, 86), dtype=np.float32).tobytes()\n",
+-    "print(f\"Data size: {sys.getsizeof(data)} bytes\")\n",
+-    "\n",
+-    "# Compress the data using Zstd\n",
+-    "cctx = zstd.ZstdCompressor()\n",
+-    "compressed_data = cctx.compress(data)\n",
+-    "print(f\"Compressed data size: {sys.getsizeof(compressed_data)} bytes\")"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 63,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "import numpy as np\n",
+-    "import zstandard as zstd\n",
+-    "\n",
+-    "# Create a large NumPy array\n",
+-    "arr = np.zeros((1024, 64, 84, 84), dtype=np.float32)\n",
+-    "arr = arr.tobytes()"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 64,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "name": "stdout",
+-     "output_type": "stream",
+-     "text": [
+-      "342 ms ± 16.6 ms per loop (mean ± std. dev. of 7 runs, 1 loop each)\n"
+-     ]
+-    }
+-   ],
+-   "source": [
+-    "# Compress the array using Zstd\n",
+-    "cctx = zstd.ZstdCompressor()\n",
+-    "%timeit compressed_data = cctx.compress(arr)"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 62,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "name": "stdout",
+-     "output_type": "stream",
+-     "text": [
+-      "906 ms ± 82.7 ms per loop (mean ± std. dev. of 7 runs, 1 loop each)\n"
+-     ]
+-    }
+-   ],
+-   "source": [
+-    "# Decompress the data using Zstd\n",
+-    "dctx = zstd.ZstdDecompressor()\n",
+-    "%timeit decompressed_data = np.frombuffer(dctx.decompress(compressed_data), dtype=arr.dtype)"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": null,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "# Verify that the decompressed data matches the original array\n",
+-    "shaped_decompressed_data = decompressed_data.reshape(arr.shape)\n",
+-    "assert np.array_equal(shaped_decompressed_data, arr)"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 59,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "name": "stdout",
+-     "output_type": "stream",
+-     "text": [
+-      "original_data_size: 1849688064\n",
+-      "compressed_data_size: 56467\n",
+-      "decompressed_data: 1849688064\n"
+-     ]
+-    },
+-    {
+-     "data": {
+-      "text/plain": [
+-       "99.99694721498727"
+-      ]
+-     },
+-     "execution_count": 59,
+-     "metadata": {},
+-     "output_type": "execute_result"
+-    }
+-   ],
+-   "source": [
+-    "# compression factor\n",
+-    "original_data_size = arr.nbytes\n",
+-    "compressed_data_size = len(compressed_data)\n",
+-    "decompressed_data_size = decompressed_data.nbytes\n",
+-    "\n",
+-    "print(f\"original_data_size: {original_data_size}\")\n",
+-    "print(f\"compressed_data_size: {compressed_data_size}\")\n",
+-    "print(f\"decompressed_data: {decompressed_data_size}\")\n",
+-    "\n",
+-    "# % compression\n",
+-    "percent_compression = (original_data_size - compressed_data_size) / original_data_size * 100\n",
+-    "percent_compression"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 46,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "data": {
+-      "text/plain": [
+-       "1849688064"
+-      ]
+-     },
+-     "execution_count": 46,
+-     "metadata": {},
+-     "output_type": "execute_result"
+-    }
+-   ],
+-   "source": [
+-    "1024 * 64 * 84 * 84 * 4 #/ (1024**3)"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": null,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "# Note to self: it is faster to reuse the compressor and decompressor objects"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 77,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "from replay_buffer import GameHistory\n",
+-    "\n",
+-    "history = GameHistory(500)\n",
+-    "\n",
+-    "observations = np.zeros((500, 3, 84, 84), dtype=np.float32)\n",
+-    "actions = np.zeros((500,), dtype=np.float32)\n",
+-    "values = np.zeros((500,), dtype=np.float32)\n",
+-    "policy = np.zeros((500, 18), dtype=np.float32)\n",
+-    "reward = np.zeros((500,), dtype=np.float32)\n",
+-    "done = np.zeros((500,), dtype=np.float32)\n",
+-    "\n",
+-    "history.init(observations, actions, values, policy, reward, done)"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 79,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "name": "stdout",
+-     "output_type": "stream",
+-     "text": [
+-      "Size of history: 0.039531199261546135 GB\n"
+-     ]
+-    }
+-   ],
+-   "source": [
+-    "import pickle \n",
+-    "\n",
+-    "history_bytes = pickle.dumps(history)\n",
+-    "history_size = len(history_bytes)\n",
+-    "history_size_in_gb = history_size / (1024**3)\n",
+-    "\n",
+-    "print(f\"Size of history: {history_size_in_gb} GB\")"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 81,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": [
+-    "cctx = zstd.ZstdCompressor()\n",
+-    "compressed_data = cctx.compress(history_bytes)"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 82,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "data": {
+-      "text/plain": [
+-       "4.0102750062942505e-06"
+-      ]
+-     },
+-     "execution_count": 82,
+-     "metadata": {},
+-     "output_type": "execute_result"
+-    }
+-   ],
+-   "source": [
+-    "compressed_data_size = len(compressed_data)\n",
+-    "compressed_data_size_in_gb = compressed_data_size / (1024**3)\n",
+-    "compressed_data_size_in_gb"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 83,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "data": {
+-      "text/plain": [
+-       "99.98985541779352"
+-      ]
+-     },
+-     "execution_count": 83,
+-     "metadata": {},
+-     "output_type": "execute_result"
+-    }
+-   ],
+-   "source": [
+-    "# % compression\n",
+-    "compression_per = (history_size - compressed_data_size) / history_size * 100\n",
+-    "compression_per"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": 85,
+-   "metadata": {},
+-   "outputs": [
+-    {
+-     "data": {
+-      "text/plain": [
+-       "0.20051375031471252"
+-      ]
+-     },
+-     "execution_count": 85,
+-     "metadata": {},
+-     "output_type": "execute_result"
+-    }
+-   ],
+-   "source": [
+-    "compressed_data_size * 50_000 / (1024**3)"
+-   ]
+-  },
+-  {
+-   "cell_type": "code",
+-   "execution_count": null,
+-   "metadata": {},
+-   "outputs": [],
+-   "source": []
+-  }
+- ],
+- "metadata": {
+-  "kernelspec": {
+-   "display_name": "brax",
+-   "language": "python",
+-   "name": "python3"
+-  },
+-  "language_info": {
+-   "codemirror_mode": {
+-    "name": "ipython",
+-    "version": 3
+-   },
+-   "file_extension": ".py",
+-   "mimetype": "text/x-python",
+-   "name": "python",
+-   "nbconvert_exporter": "python",
+-   "pygments_lexer": "ipython3",
+-   "version": "3.9.16"
+-  },
+-  "orig_nbformat": 4,
+-  "vscode": {
+-   "interpreter": {
+-    "hash": "72f1a82eef30b44791b3cd3d3ca8dcf7989ec1d40ce9f4b0dd8080c0b8620f7b"
+-   }
+-  }
+- },
+- "nbformat": 4,
+- "nbformat_minor": 2
+-}
+diff --git a/replay_buffer.py b/replay_buffer.py
+deleted file mode 100644
+index 69c85d4..0000000
+--- a/replay_buffer.py
++++ /dev/null
+@@ -1,129 +0,0 @@
+-from flax import struct
+-
+-import numpy as np
+-from typing import Union
+-
+-import zstandard as zstd
+-
+-
+-class GameHistory:
+-  def __init__(self, config=None, max_length=100):
+-    self.config = config
+-    self.max_length = max_length
+-
+-    self.observations = []
+-    self.actions = []
+-    self.search_values = []
+-    self.search_policies = []
+-    self.rewards = []
+-    self.dones = []
+-
+-  # TODO: need a good method for managing features before and after the scope of this game history
+-  def init(self, obs, action, search_value, search_policy, reward, done):
+-    self.observations.extend(obs)
+-    self.actions.extend(action)
+-    self.search_values.extend(search_value)
+-    self.search_policies.extend(search_policy)
+-    self.rewards.extend(reward)
+-    self.dones.extend(done)
+-    
+-  def make_features(self):
+-    pass
+-  
+-  def _make_obs_stack(self):
+-    pass
+-  
+-  def _prevent_episode_boundry_crossing(self):
+-    pass
+-
+-class ReplayBuffer:
+-  """
+-  Replay buffer for storing GameHistory objects and their associated priorities.
+-  
+-  Due to large memory requirements, zstd compression is used to compress each GameHistory object in the buffer.
+-  They are decompressed on the fly when sampled.
+-  
+-  Compression Factor: 
+-    Uncompressed GameHistory
+-    Compressed GameHistory
+-    
+-  This class is largely a port of Efficient Zero Ye et al. (2020) https://arxiv.org/pdf/2111.00210.pdf
+-  """
+-  
+-  def __init__(self, max_size: int, batch_size: int) -> None:
+-    self.batch_size = batch_size
+-    self.max_size = max_size
+-    self.base_index = 0
+-    self.collected_count = 0
+-    self.alpha = 1
+-    self.beta = 1
+-    
+-    self.buffer: list[GameHistory] = []
+-    self.priorities: Union[None, np.ndarray] = None
+-    self.game_lookup: list[list[tuple]] = [] # each tuple is (game_index, step_index)
+-    
+-    self.zstd_compressor = zstd.ZstdCompressor()
+-    self.zstd_decompressor = zstd.ZstdDecompressor()
+-    
+-  def put_games(self, games: tuple[GameHistory, np.ndarray]) -> None:
+-    """
+-    Add a list of games (tuples of game_history and priorities) to the replay buffer.
+-    """
+-    for game_histories, priorities in games:
+-      self._put(game_histories, priorities)
+-
+-
+-  def _put_game(self, game_history: GameHistory, priorities: np.ndarray) -> None:
+-    """
+-    Add a game_history and corresponding priorities to the replay buffer.
+-    """
+-    assert len(game_history) == len(priorities), "GameHistory and priorities must be the same length."
+-    
+-    compressed_game = self.zstd_compressor.compress(game_history)
+-    self.buffer.append(compressed_game)
+-    self.priorities = np.concatenate([self.priorities, priorities])
+-    self.game_lookup += [(self.base_index + len(self.buffer) - 1, step_index) for step_index in range(len(game_history))]
+-    
+-  def sample(self):
+-    """
+-    Sample a batch according to PER and calculate the importance sampling weights to correct for bias in loss calculation.
+-    
+-    i.e. 
+-    """
+-    universe = len(self.priorities)
+-    sample_probs = np.power(self.priorities, self.alpha)
+-    sample_probs = np.divide(sample_probs, np.sum(sample_probs))
+-    sampled_indices = np.random.choice(universe, size=self.batch_size, p=sample_probs, replace=False)
+-    weights = np.product(np.reciprocal(universe), np.reciprocal(sample_probs[sampled_indices]))
+-    weights = np.power(weights, self.beta)
+-    
+-    # sort the sampled indices by game_index
+-    sorted_indices = sorted(sampled_indices, key=lambda index: self.game_lookup[index][0])
+-    
+-    # iterate through the sorted_indices and create decompression efficient index 'smart_indicies' {game_index: [step_indices]}
+-    # to prevent redundant decompression of the same game_history
+-    smart_indicies = {}
+-    for index in sorted_indices:
+-      game_index, step_index = self.game_lookup[index]
+-      if game_index not in smart_indicies:
+-        smart_indicies[game_index] = []
+-      smart_indicies[game_index].append(step_index)
+-    
+-    
+-    batch = []
+-    for game_index in smart_indicies.keys():
+-      game_history = self.zstd_decompressor.decompress(self.buffer[game_index])
+-      for step_index in smart_indicies[game_index]:
+-        features = game_history.make_features(game_history, step_index)
+-        batch.append(features)
+-    
+-    # TODO: create Batch object
+-    
+-    
+-    return batch, weights, sampled_indices
+-
+-  def update_priorities(self, indices: np.ndarray, priorities: np.ndarray) -> None:
+-    """
+-    Update the priorities of the replay buffer.
+-    """
+-    self.priorities[indices] = priorities
+diff --git a/sebulba_muzero/__pycache__/actor.cpython-39.pyc b/sebulba_muzero/__pycache__/actor.cpython-39.pyc
+index bfb20c0..93f1c12 100644
+Binary files a/sebulba_muzero/__pycache__/actor.cpython-39.pyc and b/sebulba_muzero/__pycache__/actor.cpython-39.pyc differ
+diff --git a/sebulba_muzero/__pycache__/learner.cpython-39.pyc b/sebulba_muzero/__pycache__/learner.cpython-39.pyc
+index 11f1892..970b7e6 100644
+Binary files a/sebulba_muzero/__pycache__/learner.cpython-39.pyc and b/sebulba_muzero/__pycache__/learner.cpython-39.pyc differ
+diff --git a/sebulba_muzero/__pycache__/main.cpython-39.pyc b/sebulba_muzero/__pycache__/main.cpython-39.pyc
+index 301db57..db75879 100644
+Binary files a/sebulba_muzero/__pycache__/main.cpython-39.pyc and b/sebulba_muzero/__pycache__/main.cpython-39.pyc differ
+diff --git a/sebulba_muzero/__pycache__/network.cpython-39.pyc b/sebulba_muzero/__pycache__/network.cpython-39.pyc
+index cbc8ba2..69b0313 100644
+Binary files a/sebulba_muzero/__pycache__/network.cpython-39.pyc and b/sebulba_muzero/__pycache__/network.cpython-39.pyc differ
+diff --git a/sebulba_muzero/__pycache__/replay_buffer.cpython-39.pyc b/sebulba_muzero/__pycache__/replay_buffer.cpython-39.pyc
+index c0e761b..a511256 100644
+Binary files a/sebulba_muzero/__pycache__/replay_buffer.cpython-39.pyc and b/sebulba_muzero/__pycache__/replay_buffer.cpython-39.pyc differ
+diff --git a/sebulba_muzero/__pycache__/utils.cpython-39.pyc b/sebulba_muzero/__pycache__/utils.cpython-39.pyc
+index 798e37b..bd1f7ca 100644
+Binary files a/sebulba_muzero/__pycache__/utils.cpython-39.pyc and b/sebulba_muzero/__pycache__/utils.cpython-39.pyc differ
+diff --git a/sebulba_muzero/actor.py b/sebulba_muzero/actor.py
+index ded2ff7..f855526 100644
+--- a/sebulba_muzero/actor.py
++++ b/sebulba_muzero/actor.py
+@@ -1,6 +1,7 @@
+ import time
+ import queue
+ from collections import deque
++from functools import partial
+ 
+ import jax
+ import mctx
+@@ -11,97 +12,16 @@ from flax import struct
+ from learner import make_compute_value_target
+ from utils import softmax_temperature_fn
+ 
+-################################################
+-#################### rollout ###################
+-# TODO: padding with priorities is avoiding the complexity of an indexing system accounting for prefix and suffix
+-# currently the solution to prefix and suffix pad with zeros to prevent sampling in the padding region
+-
+-@struct.dataclass
+-class Rollout:
+-    """A class for storing batched rollout data with methods for padding used during training."""
+-    obs: np.ndarray
+-    actions: np.ndarray
+-    value_targets: np.ndarray
+-    policy_targets: np.ndarray
+-    rewards: np.ndarray
+-    dones: np.ndarray
+-    priorities: np.ndarray
+-
+-    def prefix_padding(self, last, initial_obs, args):
+-        if last is None:
+-            prefix_obs = initial_obs.reshape(
+-                args.local_num_envs, args.num_stacked_frames, args.channels_per_frame, args.obs_resolution, args.obs_resolution
+-                )
+-            prefix_action = np.zeros((args.local_num_envs, args.num_stacked_frames), dtype=np.float32)
+-
+-        else:
+-            prefix_obs = last.obs[:, -args.num_stacked_frames:, :, :, :]
+-            prefix_action = last.actions[:, -args.num_stacked_frames:]
+-
+-        zeros_priorities = np.zeros_like(prefix_action, dtype=np.float32)
+-
+-        return self.replace(
+-            obs=np.concatenate([prefix_obs, self.obs], axis=1),
+-            actions=np.concatenate([prefix_action, self.actions], axis=1),
+-            #priorities=np.concatenate([zeros_priorities, self.priorities], axis=1),
+-        )
+-
+-    # TODO: EXTREMELY IMPORTANT
+-    # need to use np.where and dones to mask out the values that are not valid
+-    def suffix_padding(self, next, args):
+-        idx = args.num_unroll_steps + args.td_steps
+-        zeros_priorities = np.zeros_like(next.priorities[:, :idx], dtype=np.float32)
+-        return self.replace(
+-            actions=np.concatenate([self.actions, next.actions[:, :idx]], axis=1),
+-            value_targets=np.concatenate([self.value_targets, next.value_targets[:, :idx]], axis=1),
+-            policy_targets=np.concatenate([self.policy_targets, next.policy_targets[:, :idx]], axis=1),
+-            rewards=np.concatenate([self.rewards, next.rewards[:, :idx]], axis=1),
+-            dones=np.concatenate([self.dones, next.dones[:, :idx]], axis=1),
+-            #priorities=np.concatenate([self.priorities, zeros_priorities], axis=1),
+-        )
+ 
+ def make_rollout_fn(actor_device, applys, args, make_env):
+     """
+-    Currently, loops over the number of training steps to be taken 
+-    and inside each step loops over the number of steps to taken per train step 
+-    range(async_update, (num-steps + 1) * async_update)
+-    when each inner loop finished the data collected is passed to the queue via the payload variable
++    Creates a function that performs a rollout of batched environments using a specfic actor device.
+     """
+ 
+     mcts_fn = make_mcts_fn(actor_device, applys, args.total_updates, args.num_simulations, args.gamma)
+     compute_value_target = make_compute_value_target(args.num_unroll_steps, args.td_steps, args.gamma)
+ 
+-    @jax.jit
+-    def make_rollout(
+-        obs: list,
+-        actions: list,
+-        pred_values: list,
+-        mcts_values: list,
+-        mcts_policies: list,
+-        rewards: list,
+-        dones: list
+-    ):
+-        obs = jnp.asarray(obs).swapaxes(0, 1)
+-        actions = jnp.asarray(actions).swapaxes(0, 1)
+-        pred_values = jnp.asarray(pred_values).swapaxes(0, 1)
+-        mcts_values = jnp.asarray(mcts_values).swapaxes(0, 1)
+-        mcts_policies = jnp.asarray(mcts_policies).swapaxes(0, 1)
+-        rewards = jnp.asarray(rewards).swapaxes(0, 1)
+-        dones = jnp.asarray(dones).swapaxes(0, 1)
+-        value_targets = compute_value_target(rewards, pred_values, dones)
+-        priorities = jnp.abs(value_targets - pred_values)
+-        return Rollout(
+-            obs=obs,
+-            actions=actions,
+-            value_targets=value_targets,
+-            policy_targets=mcts_policies,
+-            rewards=rewards,
+-            dones=dones,
+-            priorities=priorities,
+-        )
+-
+     def rollout_fn(
+-        system: str,
+         key: jax.random.PRNGKey,
+         args,
+         rollout_queue: queue.Queue,
+@@ -111,7 +31,8 @@ def make_rollout_fn(actor_device, applys, args, make_env):
+         ):
+         print(f"Thread {device_thread_id} started!")
+ 
+-        envs = make_env(system, args.env_id, args.seed + device_thread_id, args.local_num_envs)()
++        envs = make_env(args.env_id, args.seed + device_thread_id, args.local_num_envs)()
++        num_actor_threads = args.num_actor_threads
+         len_actor_device_ids = len(args.actor_device_ids)
+         global_step = 0
+         # TRY NOT TO MODIFY: start the game
+@@ -124,7 +45,6 @@ def make_rollout_fn(actor_device, applys, args, make_env):
+         returned_episode_lengths = np.zeros((args.local_num_envs,), dtype=np.float32)
+         envs.async_reset()
+ 
+-        params_queue_get_time = deque(maxlen=10)
+         rollout_time = deque(maxlen=10)
+         rollout_queue_put_time = deque(maxlen=10)
+         actor_policy_version = 0
+@@ -137,30 +57,30 @@ def make_rollout_fn(actor_device, applys, args, make_env):
+             dones = []
+             actions = []
+             rewards = []
+-            pred_values = []
+-            mcts_values = []
++            values = []
+             mcts_policies = []
+             truncations = []
+             terminations = []
+             env_recv_time = 0
++            h2d_time = 0
+             inference_time = 0
++            d2h_time = 0
+             storage_time = 0
+             env_send_time = 0
+ 
+-            # get params
+-            if params is None:
++            # if there are params in the queue, get them
++            if params_queue.qsize() != 0:
+                 params_queue_get_time_start = time.time()
+-                params = params_queue.get()
++                params, train_step = params_queue.get()
+                 actor_policy_version += 1
+-                params_queue_get_time.append(time.time() - params_queue_get_time_start)
+-                writer.add_scalar("stats/params_queue_get_time", np.mean(params_queue_get_time), global_step)
++                writer.add_scalar("stats/actor/params_queue_get_time", time.time() - params_queue_get_time_start, actor_policy_version)
+ 
+             rollout_time_start = time.time()
+             for timestep in range(0, args.num_steps):
+                 env_recv_time_start = time.time()
+                 next_obs, next_reward, next_done, _, info = envs.recv() # TODO: resolve pitch variable origin
+                 env_recv_time += time.time() - env_recv_time_start
+-                global_step += len(next_done) * len_actor_device_ids * args.world_size
++                global_step += len(next_done) * len_actor_device_ids * num_actor_threads * args.world_size
+                 env_id = info['env_id']
+ 
+                 if timestep == 0:
+@@ -181,33 +101,38 @@ def make_rollout_fn(actor_device, applys, args, make_env):
+                 action_stack = action_stack.transpose(1, 0)
+                 assert action_stack.shape == (args.local_num_envs, args.num_stacked_frames)
+ 
++                # move feature to device
++                h2d_time_start = time.time()
++                next_obs = jax.device_put(next_obs, device=actor_device)
++                action_stack = jax.device_put(action_stack, device=actor_device)
++                h2d_time += time.time() - h2d_time_start
++
+                 inference_time_start = time.time()
+-                action, pred_value, mcts_value, mcts_policy, key = mcts_fn(params, next_obs, action_stack, 0, key)
+-                # if timestep % 10 == 0:
+-                #     print(f"Thread {device_thread_id} finished {timestep} in {time.time() - inference_time_start}")
++                next_obs, action, value, mcts_policy, key = mcts_fn(params, next_obs, action_stack, train_step, key)
+                 inference_time += time.time() - inference_time_start
+ 
++                # device to host
++                d2h_time_start = time.time()
+                 action = jax.device_get(action)
+-                pred_value = jax.device_get(pred_value)
+-                mcts_value = jax.device_get(mcts_value)
+-                mcts_policies = jax.device_get(mcts_policies)
+-                key = jax.device_get(key)
++                d2h_time += time.time() - d2h_time_start
+ 
+                 env_send_time_start = time.time()
+-                envs.send(np.array(action), env_id)
++                envs.send(action, env_id)
+                 env_send_time += time.time() - env_send_time_start
+                 storage_time_start = time.time()
+-                obs.append(next_obs[:, -args.channels_per_frame:, :, :])
++                obs.append(next_obs[:, -args.channels_per_frame:, :, :]) # TODO: is it safe to assume channels is in chronological order?
+                 dones.append(next_done)
+                 actions.append(action)
+-                pred_values.append(pred_value)
+-                mcts_values.append(mcts_value)
++                values.append(value)
+                 mcts_policies.append(mcts_policy)
+                 rewards.append(next_reward)
++                
++                # info["TimeLimit.truncated"] has a bug https://github.com/sail-sg/envpool/issues/239
++                # so we use our own truncated flag
+                 truncated = info["elapsed_step"] >= envs.spec.config.max_episode_steps
+                 truncations.append(truncated)
+                 terminations.append(info["terminated"])
+-                
++
+                 episode_returns[env_id] += info["reward"]
+                 returned_episode_returns[env_id] = np.where(
+                     info["terminated"] + truncated, episode_returns[env_id], returned_episode_returns[env_id]
+@@ -219,66 +144,138 @@ def make_rollout_fn(actor_device, applys, args, make_env):
+                 )
+                 episode_lengths[env_id] *= (1 - info["terminated"]) * (1 - truncated)
+                 storage_time += time.time() - storage_time_start
+-            
++
+             if args.profile:
+                 action.block_until_ready()
+ 
+             # logs
+             rollout_time.append(time.time() - rollout_time_start)
+-            writer.add_scalar("stats/rollout_time", np.mean(rollout_time), global_step)
++            writer.add_scalar("stats/actor/rollout_time", np.mean(rollout_time), global_step)
+ 
+             avg_episodic_return = np.mean(returned_episode_returns)
+             writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, global_step)
+             writer.add_scalar("charts/avg_episodic_length", np.mean(returned_episode_lengths), global_step)
+-            print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}")
+-            print("SPS:", int(global_step / (time.time() - start_time)))
++            #print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}")
++            #print("SPS:", int(global_step / (time.time() - start_time)))
+             writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+ 
+-            writer.add_scalar("stats/truncations", np.sum(truncations), global_step)
+-            writer.add_scalar("stats/terminations", np.sum(terminations), global_step)
+-            writer.add_scalar("stats/env_recv_time", env_recv_time, global_step)
+-            writer.add_scalar("stats/inference_time", inference_time, global_step)
+-            writer.add_scalar("stats/storage_time", storage_time, global_step)
+-            writer.add_scalar("stats/env_send_time", env_send_time, global_step)
+-            # `make_bulk_array` is actually important. It accumulates the data from the lists
+-            # into single bulk arrays, which later makes transferring the data to the learner's
+-            # device slightly faster. See https://wandb.ai/costa-huang/cleanRL/reports/data-transfer-optimization--VmlldzozNjU5MTg1
+-            #if args.learner_device_ids[0] != args.actor_device_ids[0]:
++            writer.add_scalar("stats/actor/truncations", np.sum(truncations), global_step)
++            writer.add_scalar("stats/actor/terminations", np.sum(terminations), global_step)
++            writer.add_scalar("stats/actor/env_recv_time", env_recv_time, global_step)
++            writer.add_scalar("stats/actor/h2d_time", h2d_time, global_step)
++            writer.add_scalar("stats/actor/inference_time", inference_time, global_step)
++            writer.add_scalar("stats/actor/d2h_time", d2h_time, global_step)
++            writer.add_scalar("stats/actor/storage_time", storage_time, global_step)
++            writer.add_scalar("stats/actor/env_send_time", env_send_time, global_step)
++
++            rollout_mgmt_time_start = time.time()
+             current_rollout = make_rollout(
+                 obs,
+                 actions,
+-                pred_values,
+-                mcts_values,
++                values,
+                 mcts_policies,
+                 rewards,
+                 dones
+             )
+ 
+-            current_rollout = current_rollout.prefix_padding(last_rollout, initial_obs, args)
++            current_rollout = prefix_padding(current_rollout, last_rollout, initial_obs)
+             if last_rollout is not None:
+-                last_rollout = last_rollout.suffix_padding(current_rollout, args)
++                last_rollout = suffix_padding(last_rollout, current_rollout)
+                 payload_rollout = last_rollout
+ 
+                 # store data
+                 rollout_queue_put_time_start = time.time()
+                 rollout_queue.put(payload_rollout)
+-                print(f"Thread {device_thread_id} placed a batch in queue in {time.time() - update_time_start}")
+                 rollout_queue_put_time.append(time.time() - rollout_queue_put_time_start)
+-                writer.add_scalar("stats/rollout_queue_put_time", np.mean(rollout_queue_put_time), global_step)
++                writer.add_scalar("stats/actor/rollout_queue_put_time", np.mean(rollout_queue_put_time), global_step)
++
++                print(f"Thread {device_thread_id} finished rollout {global_step} in {time.time() - rollout_time_start} and put it in the queue in {time.time() - rollout_queue_put_time_start}")
+ 
+             last_rollout = current_rollout
++            rollout_mgmt_time = time.time() - rollout_mgmt_time_start
++            writer.add_scalar("stats/actor/rollout_mgmt_time", rollout_mgmt_time, global_step)
+ 
+             writer.add_scalar(
+-                "charts/SPS_update",
++                "charts/SPS",
+                 int(
+                     args.local_num_envs
+                     * args.num_steps
+                     * len_actor_device_ids
++                    * num_actor_threads
+                     * args.world_size
+                     / (time.time() - update_time_start)
+                 ),
+                 global_step,
+             )
++
++    @struct.dataclass
++    class Rollout:
++        """A class for storing batched rollout data with methods for padding"""
++        obs: np.ndarray
++        actions: np.ndarray
++        value_targets: np.ndarray
++        policy_targets: np.ndarray
++        rewards: np.ndarray
++        dones: np.ndarray
++        priorities: np.ndarray
++
++    @jax.jit
++    def make_rollout(
++        obs: list,
++        actions: list,
++        values: list,
++        mcts_policies: list,
++        rewards: list,
++        dones: list
++    ):
++        obs = jnp.asarray(obs).swapaxes(0, 1)
++        actions = jnp.asarray(actions).swapaxes(0, 1)
++        values = jnp.asarray(values).swapaxes(0, 1)
++        mcts_policies = jnp.asarray(mcts_policies).swapaxes(0, 1)
++        rewards = jnp.asarray(rewards).swapaxes(0, 1)
++        dones = jnp.asarray(dones).swapaxes(0, 1)
++        value_targets = compute_value_target(rewards, values, dones)
++        priorities = jnp.abs(value_targets - values)
++        return Rollout(
++            obs=obs,
++            actions=actions,
++            value_targets=value_targets,
++            policy_targets=mcts_policies,
++            rewards=rewards,
++            dones=dones,
++            priorities=priorities,
++        )
++
++    @jax.jit
++    def prefix_padding(current, last, initial_obs):
++        if last is None:
++            prefix_obs = initial_obs.reshape(
++                args.local_num_envs, args.num_stacked_frames, args.channels_per_frame, args.obs_resolution, args.obs_resolution
++                )
++            prefix_action = jnp.zeros((args.local_num_envs, args.num_stacked_frames), dtype=jnp.float32)
++
++        else:
++            prefix_obs = last.obs[:, -args.num_stacked_frames:, :, :, :]
++            prefix_action = last.actions[:, -args.num_stacked_frames:]
++
++
++        return current.replace(
++            obs=jnp.concatenate([prefix_obs, current.obs], axis=1),
++            actions=jnp.concatenate([prefix_action, current.actions], axis=1),
++        )
++
++    @jax.jit
++    def suffix_padding(current, next):
++        idx = args.num_unroll_steps + args.td_steps
++        return current.replace(
++            actions=jnp.concatenate([current.actions, next.actions[:, :idx]], axis=1),
++            value_targets=jnp.concatenate([current.value_targets, next.value_targets[:, :idx]], axis=1),
++            policy_targets=jnp.concatenate([current.policy_targets, next.policy_targets[:, :idx]], axis=1),
++            rewards=jnp.concatenate([current.rewards, next.rewards[:, :idx]], axis=1),
++            dones=jnp.concatenate([current.dones, next.dones[:, :idx]], axis=1),
++        )
++
++
+     return rollout_fn
+ 
+ 
+@@ -298,6 +295,8 @@ def make_mcts_fn(actor_device, applys, train_steps, num_simulations, gamma):
+             return (output, embedding)
+ 
+         def mcts(params, observations, actions, train_step, rng):
++            observations = jnp.array(observations)
++            actions = jnp.array(actions)
+             rng, _ = jax.random.split(rng)
+             embedding, value, policy = applys.initial_inference(
+                 params, observations, actions, scalar=True
+@@ -313,14 +312,9 @@ def make_mcts_fn(actor_device, applys, train_steps, num_simulations, gamma):
+                 root=root,
+                 recurrent_fn=recurrent_fn,
+                 num_simulations=num_simulations,
+-                #temperature=softmax_temperature_fn(train_step, train_steps)
++                temperature=softmax_temperature_fn(train_step, train_steps)
+             )
+-            actions = output['action']
+-            pred_value = value
+-            node_value = output['search_tree']['node_values'][:, 0]
+-            search_policy = output['action_weights']
+             
+-            # TODO: need to resolve, do we use node_value or pred_value?
+-            return actions, pred_value, node_value, search_policy, rng
++            return observations, output['action'], value, output['action_weights'], rng
+  
+         return jax.jit(mcts, device=actor_device)
+diff --git a/sebulba_muzero/learner.py b/sebulba_muzero/learner.py
+index 5dd3df9..0c9ec01 100644
+--- a/sebulba_muzero/learner.py
++++ b/sebulba_muzero/learner.py
+@@ -36,14 +36,14 @@ def make_single_device_update(applys, optimizer, config):
+ 
+         # initial inference
+         obs_stack = batch.observation.reshape((-1, *args.obs_shape))
+-        action_stack = batch.actions[:, :-K]
++        action_stack = batch.action[:, :-K]
+         h_0, v_0, p_0 = applys.initial_inference(params, obs_stack, action_stack)
+         predictions = [(1.0, None, v_0, p_0)]
+ 
+         # TODO: pretty sure you wont reach the last K
+         # unroll model with recurrent inference for K steps
+         h_k = h_0
+-        unroll_actions = batch.actions[:, -K:]
++        unroll_actions = batch.action[:, -K:]
+         for k in range(K):
+             h_kp1, r_k, v_k, p_k  = applys.recurrent_inference(params, h_k, unroll_actions[:, k])
+             predictions.append((1/K, r_k, v_k, p_k))
+@@ -53,11 +53,11 @@ def make_single_device_update(applys, optimizer, config):
+         for k, (scale, r_k, v_k, p_k) in enumerate(predictions):
+             v_loss = jnp.mean(softmax_cross_entropy(v_k, batch.value[:, k]))
+             p_loss = jnp.mean(softmax_cross_entropy(p_k, batch.policy[:, k]))
+-            if k == 0 :
++            if k != 0 and r_k is not None:
+                 r_loss = jnp.mean(softmax_cross_entropy(r_k, batch.reward[:, k]))
+-                l_k = scale_gradient(v_loss + p_loss, scale)
+-            else:
+                 l_k = scale_gradient(v_loss + p_loss + r_loss, scale)
++            else:
++                l_k = scale_gradient(v_loss + p_loss, scale)
+             loss += l_k
+             h_k = h_kp1
+ 
+@@ -68,7 +68,7 @@ def make_single_device_update(applys, optimizer, config):
+     def single_device_update(muzero_state, batch):
+         (loss, (v_loss, p_loss, r_loss)), grads = value_and_grad(muzero_state.params, batch)
+         grads = jax.lax.pmean(grads, axis_name="local_devices")
+-        updates, new_opt_state = optimizer.update(grads, muzero_state.opt_state)
++        updates, new_opt_state = optimizer.update(grads, muzero_state.opt_state, muzero_state.params)
+         new_params = optax.apply_updates(muzero_state.params, updates)
+         muzero_state = muzero_state.replace(
+             params=new_params,
+diff --git a/sebulba_muzero/main.py b/sebulba_muzero/main.py
+index 0704861..27af0a4 100644
+--- a/sebulba_muzero/main.py
++++ b/sebulba_muzero/main.py
+@@ -55,10 +55,10 @@ def parse_args():
+         help="the id of the environment")
+     parser.add_argument("--total_updates", type=int, default=1_000_000,
+         help="total timesteps of the experiments")
+-    parser.add_argument("--local-num-envs", type=int, default=20,
++    parser.add_argument("--update_frequency", type=int, default=1_000,
++        help="frequency to update the actor params with the most recent learner params")
++    parser.add_argument("--local-num-envs", type=int, default=50,
+         help="the number of parallel game environments")
+-    # parser.add_argument("--num-steps", type=int, default=1000,
+-    #     help="the number of steps to run in each environment per rollout")
+     parser.add_argument("--batch-size", type=float, default=1024,
+         help="Batch size")
+     parser.add_argument("--learning-rate", type=float, default=10e-4,
+@@ -87,13 +87,13 @@ def parse_args():
+         help="the latent representation clipping coefficient")
+     parser.add_argument("--value-coef", type=float, default=0.5,
+         help="coefficient of the value function")
+-    parser.add_argument("--buffer-size", type=float, default=10,
++    parser.add_argument("--buffer-size", type=float, default=10, #50_000
+         help="maximum number of sequences in the replay buffer")
+-    parser.add_argument("--sequence-length", type=float, default=500,
++    parser.add_argument("--sequence-length", type=float, default=200,
+         help="maximum length of a sequence in the replay buffer")
+ 
+     # resource managment
+-    parser.add_argument("--actor-device-ids", type=int, nargs="+", default=[0, 1],#, 1],
++    parser.add_argument("--actor-device-ids", type=int, nargs="+", default=[0, 1],
+         help="the device ids that actor workers will use (currently only support 1 device)")
+     parser.add_argument("--num-actor-threads", type=int, default=2,
+         help="the number of actor threads to use per core")
+@@ -101,13 +101,23 @@ def parse_args():
+         help="the device ids that learner workers will use")
+     parser.add_argument("--distributed", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+         help="whether to use `jax.distirbuted`")
+-    parser.add_argument("--profile", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
++    parser.add_argument("--profile", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True, 
+         help="whether to call block_until_ready() for profiling")
+     parser.add_argument("--test-actor-learner-throughput", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+         help="whether to test actor-learner throughput by removing the actor-learner communication")
+ 
++    # wandb
++    parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
++        help="if toggled, this experiment will be tracked with Weights and Biases")
++    parser.add_argument("--wandb-project-name", type=str, default="SebulbaMuzero",
++        help="the wandb's project name")
++    parser.add_argument("--wandb-entity", type=str, default=None,
++        help="the entity (team) of wandb's project")
++    parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
++        help="whether to capture videos of the agent performances (check out `videos` folder)")
++
+     args = parser.parse_args()
+-    args.num_steps = args.sequence_length
++    args.num_steps = args.sequence_length # environments are rollouted out for the length of a replay buffer sequence
+     args.channels_per_frame = 1 if args.gray_scale else 3
+     return args
+ 
+@@ -116,12 +126,6 @@ ATARI_MAX_FRAMES = int(
+     108000 / 4 # from cleanba code
+ )
+ 
+-# TODO: change this to *args
+-def make_env_helper(system, env_id, seed, local_num_envs):
+-    if system == "Linux":
+-        return make_env(env_id, seed, local_num_envs)
+-    else:
+-        return nonlinux_make_env(env_id, seed, local_num_envs)
+ 
+ def make_env(env_id, seed, num_envs):
+     def thunk():
+@@ -147,20 +151,18 @@ def make_env(env_id, seed, num_envs):
+ 
+     return thunk
+ 
+-
+ class MuZeroAtariConfig:
+     def __init__(self, args):
+         self.args = args
+         self.scalar_to_categorical, self.categorical_to_scalar = make_categorical_representation_fns(args.support_size)
+-        self.tiled_action_encoding_fn, self.bias_plane_action_encoding_fn = make_action_encoding_fn(
++        self.initial_action_encoder, self.recurrent_action_encoder = make_action_encoding_fn(
+             args.embedding_resolution, args.obs_resolution, args.num_actions
+         )
+ 
+-
+ if __name__ == "__main__":
+     args = parse_args()
+     # TODO: setup jax distributed
+-    
++
+     args.world_size = jax.process_count()
+     args.local_rank = jax.process_index()
+     args.num_envs = args.local_num_envs * args.world_size
+@@ -185,8 +187,20 @@ if __name__ == "__main__":
+     args.global_learner_decices = [str(item) for item in global_learner_decices]
+     args.actor_devices = [str(item) for item in actor_devices]
+     args.learner_devices = [str(item) for item in learner_devices]
+-    
++
+     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{uuid.uuid4()}"
++    if args.track and args.local_rank == 0:
++        import wandb
++
++        wandb.init(
++            project=args.wandb_project_name,
++            #entity=args.wandb_entity,
++            sync_tensorboard=True,
++            config=vars(args),
++            name=run_name,
++            monitor_gym=True,
++            save_code=True,
++        )
+ 
+     writer = SummaryWriter(f"runs/{run_name}")
+     writer.add_text(
+@@ -201,7 +215,7 @@ if __name__ == "__main__":
+     key, network_key, buffer_key = jax.random.split(key, 3)
+ 
+     # env setup
+-    envs = make_env_helper(system, args.env_id, args.seed, args.local_num_envs)()
++    envs = make_env(args.env_id, args.seed, args.local_num_envs)()
+     args.obs_shape = envs.observation_space.shape
+     args.num_actions = envs.single_action_space.n
+     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+@@ -219,7 +233,7 @@ if __name__ == "__main__":
+     schedule = optax.warmup_cosine_decay_schedule(
+         init_value=args.learning_rate,
+         peak_value=args.learning_rate,
+-        warmup_steps=500,
++        warmup_steps=1,
+         decay_steps=args.total_updates,
+         end_value=0.0
+     )
+@@ -247,19 +261,18 @@ if __name__ == "__main__":
+     dummy_writer = SimpleNamespace()
+     dummy_writer.add_scalar = lambda x,y,z: None
+ 
+-    rollout_queue = queue.Queue(maxsize=args.num_actor_threads * len(args.actor_device_ids))
++    rollout_queue = queue.Queue(maxsize=1000)
+     params_queues = []
+ 
+     for d_idx, d_id in enumerate(args.actor_device_ids):
+         device_params = jax.device_put(flax.jax_utils.unreplicate(muzero_state.params), local_devices[d_id])
+-        rollout_fn = make_rollout_fn(local_devices[d_id], applys, args, make_env_helper)
++        rollout_fn = make_rollout_fn(local_devices[d_id], applys, args, make_env)
+         for thread_id in range(args.num_actor_threads):
+             params_queue = queue.Queue(maxsize=1)
+-            params_queue.put(device_params)
++            params_queue.put((device_params, 0)) # (params, train_step)
+             threading.Thread(
+                 target=rollout_fn,
+                 args=(
+-                    system,
+                     jax.device_put(key, local_devices[d_id]),
+                     args,
+                     rollout_queue,
+@@ -270,20 +283,21 @@ if __name__ == "__main__":
+             ).start()
+             params_queues.append(params_queue)
+ 
+-    batch_queue = queue.Queue(maxsize=5) # arbitrary
+-    start_replay_buffer_manager(rollout_queue, batch_queue, config) # TODO: may want to include some logging inside this thread to monitor the replay buffer
++    batch_queue = queue.Queue(maxsize=1000) # you want this thread to never block on the put side
++    start_replay_buffer_manager(learner_devices, rollout_queue, batch_queue, config, writer)
+ 
+-    batch_queue_get_time = deque(maxlen=1000) # you want this thread to never block on the put side
++    update_time = deque(maxlen=10)
++    batch_queue_get_time = deque(maxlen=10)
+     data_transfer_time = deque(maxlen=10)
+     learner_network_version = 0
+     while True:
+-        update_iteration_start = time.time()
++        update_start_time = time.time()
+         learner_network_version += 1
+ 
+         batch_queue_get_start = time.time()
+-        (batch, weights, sampled_indicies) = batch_queue.get()
++        batch = batch_queue.get()
+         batch_queue_get_time.append(time.time() - batch_queue_get_start)
+-        writer.add_scalar("stats/batch_queue_get_time", np.mean(batch_queue_get_time), learner_network_version)
++        writer.add_scalar("stats/learner/batch_queue_get_time", np.mean(batch_queue_get_time), learner_network_version)
+ 
+         device_transfer_start = time.time()
+         shard_fn = lambda x: jax.device_put_sharded(
+@@ -291,17 +305,25 @@ if __name__ == "__main__":
+             learner_devices
+         )
+         sharded_batch = jax.tree_map(shard_fn, batch)
+-        writer.add_scalar("stats/learner/data_transfer_time", time.time() - device_transfer_start, learner_network_version)
++        data_transfer_time.append(time.time() - device_transfer_start)
++        writer.add_scalar("stats/learner/data_transfer_time", np.mean(data_transfer_time), learner_network_version)
+ 
+         training_time_start = time.time()
+         muzero_state, loss, v_loss, p_loss, r_loss = multi_device_update(
+                 muzero_state, sharded_batch
+         )
+-        v_loss.block_until_ready()
+-        writer.add_scalar("stats/training_time", time.time() - training_time_start, learner_network_version)
+-        writer.add_scalar("stats/rollout_queue_size", rollout_queue.qsize(), learner_network_version)
+-        writer.add_scalar("stats/batch_queue_size", batch_queue.qsize(), learner_network_version)
+-        
++
++        update_time.append(time.time() - update_start_time)
++        writer.add_scalar("stats/learner/update_time", np.mean(update_time), learner_network_version)
++
++        if args.profile:
++            loss.mean().block_until_ready()
++
++        writer.add_scalar("stats/learner/training_time", time.time() - training_time_start, learner_network_version)
++        writer.add_scalar("stats/learner/rollout_queue_size", rollout_queue.qsize(), learner_network_version)
++        writer.add_scalar("stats/learner/batch_queue_size", batch_queue.qsize(), learner_network_version)
++        writer.add_scalar("stats/learner/rollout_queue_size", rollout_queue.qsize(), learner_network_version)
++
+         # TRY NOT TO MODIFY: record rewards for plotting purposes
+         writer.add_scalar("charts/learning_rate", schedule(learner_network_version).item(), learner_network_version)
+         writer.add_scalar("losses/value_loss", np.mean(v_loss).item(), learner_network_version)
+@@ -309,19 +331,11 @@ if __name__ == "__main__":
+         writer.add_scalar("losses/reward_loss", np.mean(r_loss).item(), learner_network_version)
+         writer.add_scalar("losses/loss", np.mean(loss), learner_network_version)
+ 
+-        # writer.add_scalar("stats/training_time", time.time() - training_time_start, global_step)
+-        # writer.add_scalar("stats/rollout_queue_size", rollout_queue.qsize(), global_step)
+-        # writer.add_scalar("stats/params_queue_size", params_queue.qsize(), global_step)
+-        # print(
+-        #     global_step,
+-        #     f"actor_policy_version={actor_network_version}, learner_policy_version={learner_network_version}, training time: {time.time() - training_time_start}s", # learner_network_version
+-        # )
+-
+-        #writer.add_scalar("charts/learning_rate", muzero.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
+         # update network version
+-        # if update >= args.num_updates:
+-        #     break
+-            # for d_idx, d_id in enumerate(args.actor_device_ids):
+-            #     device_params = jax.device_put(flax.jax_utils.unreplicate(muzero_state.params), local_devices[d_id])
+-            #     for thread_id in range(args.num_actor_threads):
+-            #         params_queues[d_idx * args.num_actor_threads + thread_id].put(device_params)
+\ No newline at end of file
++        if learner_network_version % args.update_frequency == 0 and learner_network_version > 0:
++            params_put_time_start = time.time()
++            for d_idx, d_id in enumerate(args.actor_device_ids):
++                device_params = jax.device_put(flax.jax_utils.unreplicate(muzero_state.params), local_devices[d_id])
++                for thread_id in range(args.num_actor_threads):
++                    params_queues[d_idx * args.num_actor_threads + thread_id].put((device_params, learner_network_version))
++            params_put_time = time.time() - params_put_time_start
+\ No newline at end of file
+diff --git a/sebulba_muzero/network.py b/sebulba_muzero/network.py
+index 62df282..7b05c35 100644
+--- a/sebulba_muzero/network.py
++++ b/sebulba_muzero/network.py
+@@ -4,7 +4,7 @@ import haiku as hk
+ import chex
+ from flax import struct
+ 
+-from utils import make_action_encoding_fn, make_categorical_representation_fns
++from utils import min_max_normalize
+ 
+ nonlinearity = jax.nn.relu
+ 
+@@ -76,9 +76,7 @@ class RepresentationNetwork(hk.Module):
+         self.pooling_final = hk.AvgPool(window_shape=(6, 6), strides=2, padding="SAME") # (6, 6)
+ 
+     def __call__(self, input):
+-        # assert input.shape == (batch_dim, 96, 96, 128)
+         x = jnp.transpose(input, (0, 2, 3, 1))
+-        #x = x / (255.0)
+         x = self.conv_0(x)
+         x = self.tower_0(x)
+         x = self.conv_1(x)
+@@ -86,7 +84,7 @@ class RepresentationNetwork(hk.Module):
+         x = self.pooling_2(x)
+         x = self.tower_2(x)
+         embedding = self.pooling_final(x)
+-        # assert shape = (batch_dim, 6, 6, 256)
++        #embedding = min_max_normalize(embedding)
+         return embedding
+ 
+ class DynamicsNetwork(hk.Module):
+@@ -109,7 +107,9 @@ class DynamicsNetwork(hk.Module):
+         x = jnp.concatenate((embedding, action_encoding), axis=-1)
+ 
+         next_embedding = self.torso(x)
++        #next_embedding = min_max_normalize(next_embedding)
+         reward = self.reward_head(next_embedding)
++        
+ 
+         return next_embedding, reward
+ 
+@@ -154,14 +154,13 @@ def make_muzero_network(config):
+ 
+     def fn():
+         representation_net = RepresentationNetwork()
+-        dynamics_net = DynamicsNetwork(num_blocks, num_hiddens, support_size, config.tiled_action_encoding_fn)
++        dynamics_net = DynamicsNetwork(num_blocks, num_hiddens, support_size, config.recurrent_action_encoder)
+         prediction_net = PredictionNetwork(support_size, num_actions)
+ 
+-        # NOTE: batch size need to be dynamic to accomodate inference and training
+-        def make_initial_encoding(obs, action):
+-            obs = obs / 255.0
+-            action = config.bias_plane_action_encoding_fn(action) 
+-            encoding = jnp.concatenate([obs, action], axis=1)
++        def make_initial_encoding(obs_stack, action_stack):
++            obs_stack = obs_stack / 255.0
++            action_enc = config.initial_action_encoder(action_stack) 
++            encoding = jnp.concatenate([obs_stack, action_enc], axis=1)
+             assert encoding.shape[1:] == (128, 84, 84) or encoding.shape[1:] == (64, 84, 84)
+             return encoding 
+ 
+diff --git a/sebulba_muzero/replay_buffer.py b/sebulba_muzero/replay_buffer.py
+index b1a82dd..0121655 100644
+--- a/sebulba_muzero/replay_buffer.py
++++ b/sebulba_muzero/replay_buffer.py
+@@ -15,28 +15,22 @@ import zstandard as zstd
+ State = Any
+ Sample = Any
+ 
+-@struct.dataclass
+-class Trajectory:
+-    observation: jnp.ndarray
+-    action: jnp.ndarray
+-    value_target: jnp.ndarray
+-    policy_target: jnp.ndarray
+-    reward_target: jnp.ndarray
+-    priority: jnp.ndarray
+-
+ @struct.dataclass
+ class Batch:
+     observation: jnp.ndarray
+-    actions: jnp.ndarray
++    action: jnp.ndarray
+     value: jnp.ndarray
+     policy: jnp.ndarray
+     reward: jnp.ndarray
+-    
++    weight: jnp.ndarray
++    index: jnp.ndarray
++
++
+ class GameHistory:
+   def __init__(self, config=None):
+     self.config = config
+     self.max_length = config.sequence_length
+-    
++
+     self.prefix_length = config.num_stacked_frames
+     self.suffix_length = config.num_unroll_steps + config.td_steps
+ 
+@@ -47,7 +41,6 @@ class GameHistory:
+     self.rewards = []
+     self.dones = []
+ 
+-  # TODO: need a good method for managing features before and after the scope of this game history
+   def init(self, obs, action, value_target, policy_target, reward, done):
+     self.observations.extend(obs)
+     self.actions.extend(action)
+@@ -100,6 +93,10 @@ class GameHistory:
+     assert prefixed_vars_len == suffixed_vars_len == full_vars_len, "GameHistory variables must be the same length."
+     return prefixed_vars_len
+ 
++@struct.dataclass
++class ExperienceBuffer:
++  pass
++
+ class ReplayBuffer:
+   """
+   Replay buffer for storing GameHistory objects and their associated priorities.
+@@ -107,14 +104,15 @@ class ReplayBuffer:
+   Due to large memory requirements, zstd compression is used to compress each GameHistory object in the buffer.
+   They are decompressed on the fly when sampled.
+   
+-  Compression Factor: 
++  Compression Factor: # TODO
+     Uncompressed GameHistory
+     Compressed GameHistory
+ 
+   This class is largely a port of Efficient Zero Ye et al. (2020) https://arxiv.org/pdf/2111.00210.pdf
+   """
+ 
+-  def __init__(self, max_size: int, batch_size: int, config) -> None:
++  def __init__(self, learner_devices, max_size: int, batch_size: int, config) -> None:
++    self.learner_device = learner_devices[0]
+     self.args = config.args
+     self.batch_size = batch_size
+     self.max_size = max_size
+@@ -127,8 +125,9 @@ class ReplayBuffer:
+     self.priorities: Union[None, np.ndarray] = None
+     self.game_lookup: list[list[tuple]] = [] # each tuple is (game_index, step_index)
+ 
++    self.samples_calls = 0
+     self.game_steps_seen = 0
+-    self.game_steps_to_start = batch_size * 1 # how many batches do you want to collect before starting to sample
++    self.game_steps_to_start = batch_size * 2 # how many batches do you want to collect before starting to sample
+ 
+     self.zstd_compressor = zstd.ZstdCompressor()
+     self.zstd_decompressor = zstd.ZstdDecompressor()
+@@ -155,38 +154,46 @@ class ReplayBuffer:
+     self.buffer.append(compressed_game)
+     self.priorities = priorities if not self.game_steps_seen else np.concatenate([self.priorities, priorities])
+     self.game_lookup += [(self.base_index + len(self.buffer) - 1, step_index) for step_index in range(len(game))]
+-    self.game_steps_seen += len(game) * self.args.sequence_length
++    self.game_steps_seen += len(game)
+ 
+-  def sample(self):
++  def sample(self, writer, num_batches=10):
+     """
+     Sample a batch according to PER and calculate the importance sampling weights to correct for bias in loss calculation.
+ 
+-    i.e. 
++    i.e.
+     """
+-    if self.game_steps_to_start > self.game_steps_seen:
++    if self.batch_size * num_batches > self.game_steps_seen:
+       return None 
+-    universe = len(self.priorities)
+-    sample_probs = np.power(self.priorities, self.alpha)
+-    sample_probs = np.divide(sample_probs, np.sum(sample_probs))
+-    sampled_indices = np.random.choice(universe, size=self.batch_size, p=sample_probs, replace=False)
+-    weights = (1 / universe) * np.reciprocal(sample_probs[sampled_indices])
+-    weights = np.power(weights, self.beta)
++    self.samples_calls += 1
++    make_indicies_time_start = time.time()
++    N = len(self.priorities)
++    sample_probs = self.priorities**self.alpha
++    sample_probs /= np.sum(sample_probs)
++    sampled_indices = np.random.choice(N, size=self.batch_size*num_batches, p=sample_probs, replace=False)
++    weights = ((1 / N) * (1 / sample_probs[sampled_indices])) ** self.beta
++    make_indicies_time = time.time() - make_indicies_time_start
++    writer.add_scalar("replay_buffer/make_indicies_time", make_indicies_time, self.samples_calls)
+ 
+     # create decompression efficient index 'smart_indicies' {game_index: [step_indices]}
+     # to prevent redundant decompression of the same game_history
++    make_smart_index_time_start = time.time()
+     smart_indicies = {}
+     for index in sampled_indices:
+       game_index, step_index = self.game_lookup[index]
+       if game_index not in smart_indicies:
+         smart_indicies[game_index] = []
+       smart_indicies[game_index].append(step_index)
++    make_smart_index_time = time.time() - make_smart_index_time_start
++    writer.add_scalar("replay_buffer/make_smart_index_time", make_smart_index_time, self.samples_calls)
+ 
++    loop_over_games_time_start = time.time()
+     observations = []
+     actions = []
+     values = []
+     policies = []
+     rewards = []
+     for game_index in smart_indicies.keys():
++      # TODO: recompress game_history
+       bytes = self.zstd_decompressor.decompress(self.buffer[game_index])
+       game_history = pickle.loads(bytes)
+       for step_index in smart_indicies[game_index]:
+@@ -196,25 +203,57 @@ class ReplayBuffer:
+         values.append(value)
+         policies.append(policy)
+         rewards.append(reward)
+-
+-    observations = np.asarray(observations)
+-    actions = np.asarray(actions)
+-    values = np.asarray(values)
+-    policies = np.asarray(policies)
+-    rewards = np.asarray(rewards)
+-    
++    loop_over_games_time = time.time() - loop_over_games_time_start
++    writer.add_scalar("replay_buffer/loop_over_games_time", loop_over_games_time, self.samples_calls)
++
++    stack_time_start = time.time()
++    observations = jnp.asarray(observations)
++    actions = jnp.asarray(actions)
++    values = jnp.asarray(values)
++    policies = jnp.asarray(policies)
++    rewards = jnp.asarray(rewards)
++    stack_time = time.time() - stack_time_start
++    writer.add_scalar("replay_buffer/stack_time", stack_time, self.samples_calls)
++
++    to_categorical_time_start = time.time()
+     values = self.scalar_to_categorical(values)
+     rewards = self.scalar_to_categorical(rewards)
+-    
++    to_categorical_time = time.time() - to_categorical_time_start
++    writer.add_scalar("replay_buffer/to_categorical_time", to_categorical_time, self.samples_calls)
++
++    make_batch_time_start = time.time()
+     batch = Batch(
+       observation=observations,
+-      actions=actions,
++      action=actions,
+       value=values,
+       policy=policies,
+-      reward=rewards
++      reward=rewards,
++      weight=weights,
++      index=sampled_indices,
+     )
+-    
+-    return batch, weights, sampled_indices
++    make_batch_time = time.time() - make_batch_time_start
++    writer.add_scalar("replay_buffer/make_batch_time", make_batch_time, self.samples_calls)
++
++    # split batch * num_batches into their own batch objects
++    batch = jax.tree_map(lambda x: np.array_split(x, num_batches), batch)
++
++    split_batch_time_start = time.time()
++    batches = []
++    for idx in range(num_batches):
++      b = Batch(
++        observation=batch.observation[idx],
++        action=batch.action[idx],
++        value=batch.value[idx],
++        policy=batch.policy[idx],
++        reward=batch.reward[idx],
++        weight=batch.weight[idx],
++        index=batch.index[idx],
++      )
++      batches.append(b)
++    split_batch_time = time.time() - split_batch_time_start
++    writer.add_scalar("replay_buffer/split_batch_time", split_batch_time, self.samples_calls)
++
++    return batches
+ 
+   def update_priorities(self, indices: np.ndarray, priorities: np.ndarray) -> None:
+     """
+@@ -225,16 +264,17 @@ class ReplayBuffer:
+ 
+ ##############################################################################################################
+   
+-def start_replay_buffer_manager(rollout_queue, batch_queue, config):
++def start_replay_buffer_manager(learner_devices, rollout_queue, batch_queue, config, writer):
+   """
+   Conviences function for starting the replay buffer manager.
+   Responsible for managing the communication between the actor and learner processes
+   """
+   args = config.args
+ 
++# TODO: this is making a copy, consider making game histories a dataclass
+   def preprocess_data(rollout):
+     """Convert a batched rollout to a list of GameHistory objects."""
+-    
++
+     game_histories = []
+     for i in range(args.local_num_envs):
+       game_history = GameHistory(args)
+@@ -249,31 +289,65 @@ def start_replay_buffer_manager(rollout_queue, batch_queue, config):
+       game_histories.append((game_history, rollout.priorities[i]))
+     return game_histories
+ 
+-  def rollout_queue_to_replay_buffer(replay_buffer, queue, rollout_queue):
++  def rollout_queue_to_replay_buffer(replay_buffer, queue, rollout_queue, writer):
+         """ Thread dedicated to processing rollouts and inserting data in the replay buffer."""
++        counter = 0
+         while True:
++          rollout_queue_get_time_start = time.time()
+           rollouts = rollout_queue.get()
++          rollout_queue_get_time = time.time() - rollout_queue_get_time_start
++          
++          preprocess_data_time_start = time.time()
+           game_histories = preprocess_data(rollouts)
++          preprocess_data_time = time.time() - preprocess_data_time_start
++          
++          buffer_get_time_start = time.time()
+           replay_buffer = queue.get()
++          buffer_get_time = time.time() - buffer_get_time_start
++          
++          put_games_time_start = time.time()
+           replay_buffer.put_games(game_histories)
++          put_games_time = time.time() - put_games_time_start
++          game_steps_seen = replay_buffer.game_steps_seen
++
+           queue.put(replay_buffer)
+-    
+-  def replay_buffer_to_batch_queue(replay_buffer, queue, batch_queue):
++
++          counter += 1
++          writer.add_scalar('stats/rollout_queue_to_replay_buffer/rollout_queue_get_time', rollout_queue_get_time, counter)
++          writer.add_scalar('stats/rollout_queue_to_replay_buffer/preprocess_data_time', preprocess_data_time, counter)
++          writer.add_scalar('stats/rollout_queue_to_replay_buffer/buffer_get_time', buffer_get_time, counter)
++          writer.add_scalar('stats/rollout_queue_to_replay_buffer/put_games_time', put_games_time, counter)
++          writer.add_scalar('stats/rollout_queue_to_replay_buffer/game_steps_seen', game_steps_seen, counter)
++
++  def replay_buffer_to_batch_queue(replay_buffer, queue, batch_queue, writer):
+       """Thread dedicated to sampling data from the replay buffer and populating the batch queue."""
++      counter = 0
+       while True:
++          buffer_get_time_start = time.time()
+           replay_buffer = queue.get()
+-          batch = replay_buffer.sample()
+-          if batch is None: 
+-            queue.put(replay_buffer)
+-            time.sleep(1)
+-            continue
++          buffer_get_time = time.time() - buffer_get_time_start
++
++          sample_time_start = time.time()
++          batches = replay_buffer.sample()
++          sample_time = time.time() - sample_time_start
++
+           queue.put(replay_buffer)
+-          batch_queue.put(batch)
++          if batches is not None:
++            counter += 1
++            for batch in batches:
++              batch_queue.put(batch)
++
++            writer.add_scalar('stats/replay_buffer_to_batch_queue/buffer_get_time', buffer_get_time, counter)
++            writer.add_scalar('stats/replay_buffer_to_batch_queue/sample_time', sample_time, counter)
++            continue
++          
++          # replay buffer is not ready, wait and try again
++          time.sleep(1)
+ 
+-  replay_buffer = ReplayBuffer(args.buffer_size, args.batch_size, config)
++  replay_buffer = ReplayBuffer(learner_devices, args.buffer_size, args.batch_size, config)
+ 
+   access_queue = queue.Queue(1)
+   access_queue.put(replay_buffer)
+ 
+-  threading.Thread(target=rollout_queue_to_replay_buffer, args=(replay_buffer, access_queue, rollout_queue)).start()
+-  threading.Thread(target=replay_buffer_to_batch_queue, args=(replay_buffer, access_queue, batch_queue)).start()
+\ No newline at end of file
++  threading.Thread(target=rollout_queue_to_replay_buffer, args=(replay_buffer, access_queue, rollout_queue, writer)).start()
++  threading.Thread(target=replay_buffer_to_batch_queue, args=(replay_buffer, access_queue, batch_queue, writer)).start()
+\ No newline at end of file
+diff --git a/sebulba_muzero/runs/Breakout-v5__main__1__cbeaa91f-d248-4302-9b3e-615a7359bd2d/events.out.tfevents.1681781524.t1v-n-9ec8b123-w-0 b/sebulba_muzero/runs/Breakout-v5__main__1__cbeaa91f-d248-4302-9b3e-615a7359bd2d/events.out.tfevents.1681781524.t1v-n-9ec8b123-w-0
+deleted file mode 100644
+index bc1f22f..0000000
+Binary files a/sebulba_muzero/runs/Breakout-v5__main__1__cbeaa91f-d248-4302-9b3e-615a7359bd2d/events.out.tfevents.1681781524.t1v-n-9ec8b123-w-0 and /dev/null differ
+diff --git a/sebulba_muzero/runs/Breakout-v5__main__1__d0f4201e-ae5e-4219-aa7c-4d34454ac6d7/events.out.tfevents.1681791671.t1v-n-9ec8b123-w-0 b/sebulba_muzero/runs/Breakout-v5__main__1__d0f4201e-ae5e-4219-aa7c-4d34454ac6d7/events.out.tfevents.1681791671.t1v-n-9ec8b123-w-0
+deleted file mode 100644
+index 3b7c9ff..0000000
+Binary files a/sebulba_muzero/runs/Breakout-v5__main__1__d0f4201e-ae5e-4219-aa7c-4d34454ac6d7/events.out.tfevents.1681791671.t1v-n-9ec8b123-w-0 and /dev/null differ
+diff --git a/sebulba_muzero/test_train.py b/sebulba_muzero/test_train.py
+index 0862cc7..9bd53b6 100644
+--- a/sebulba_muzero/test_train.py
++++ b/sebulba_muzero/test_train.py
+@@ -9,14 +9,15 @@ from learner import make_single_device_update
+ from network import make_muzero_network, NetworkApplys
+ from utils import TrainState
+ from replay_buffer import Batch
+-from main import parse_args, make_env_helper, MuZeroAtariConfig
++from main import parse_args, MuZeroAtariConfig
++
+ 
+ if __name__ == "__main__":
+     args = parse_args()
+     args.obs_shape = (96, 84, 84)
+     args.num_actions = 4
+     config = MuZeroAtariConfig(args)
+-    
++
+     random.seed(args.seed)
+     np.random.seed(args.seed)
+     key = jax.random.PRNGKey(args.seed)
+@@ -24,11 +25,11 @@ if __name__ == "__main__":
+     
+     network = make_muzero_network(config)
+     applys = NetworkApplys(*network.apply)
+-    
++
+     init_obs = jnp.zeros((args.local_num_envs,  *args.obs_shape))
+     init_action = jnp.zeros((args.local_num_envs, args.num_stacked_frames))
+     network_params = network.init(network_key, init_obs, init_action)
+-    
++
+     optimizer = optax.adam(1e-3)
+     opt_state = optimizer.init(network_params)
+     
+diff --git a/sebulba_muzero/utils.py b/sebulba_muzero/utils.py
+index 4469ac7..fa87fd9 100644
+--- a/sebulba_muzero/utils.py
++++ b/sebulba_muzero/utils.py
+@@ -16,10 +16,18 @@ class TrainState:
+     opt_state: optax.OptState
+     train_step: chex.Array
+   
+-def min_max_scaling():
+-    pass
++def min_max_normalize(x):
++    min = jnp.min(x)
++    max = jnp.max(x)
++    return (x - min) / (max - min)
+ 
+ def softmax_temperature_fn(train_step, train_steps):
++    """
++    Temperature annealing function from Schrittwieser et al., 2020, Appendix F
++        0-500k steps: 1
++        500k-750k steps: 0.5
++        750k-1M steps: 0.25
++    """
+     percent_complete = train_step / train_steps
+     return jax.lax.cond(
+         jnp.less_equal(
+@@ -36,23 +44,24 @@ def softmax_temperature_fn(train_step, train_steps):
+ 
+ def make_action_encoding_fn(embeding_resolution, obs_resolution, num_actions):
+     """
+-    Turns a batch of actions into a ont-hot encoding tiled to (batch_dim, resolution, resolution)
++    recurrent_fn_action_encoder: 
++        operates on a batch of actions of shape (batch_dim,)
++    initial_fn_action_encoder:
++        operates on a batch of actions over time of shape (batch_dim, time_dim)
+     """
+ 
+-    def tiled_encoding(action):
+-        """Turns a scalar action into a ont-hot encoding tiled to (resolution, resolution)"""
+-        one_hot = jax.nn.one_hot(action, num_actions)
+-        reshape = jnp.reshape(one_hot, (2, 2))
+-        return jnp.tile(reshape, (embeding_resolution // 2, embeding_resolution // 2))
+-
+-    def bias_plane_encoding(scalar_action):
++    def initial_action_encoder(scalar_action):
+         return jnp.broadcast_to(scalar_action, (obs_resolution, obs_resolution)) / num_actions
+ 
+-    return jax.vmap(tiled_encoding), jax.vmap(jax.vmap(bias_plane_encoding))
++    def recurrent_action_encoder(scalar_action):
++        return jnp.broadcast_to(scalar_action, (embeding_resolution, embeding_resolution)) / num_actions
++
++    return jax.vmap(jax.vmap(initial_action_encoder)), jax.vmap(recurrent_action_encoder)
+ 
+ def make_categorical_representation_fns(support_size):
+     """
+     Creates functions for mapping scalar->categorical and categorical->scalar representations
++    Signed hyperbolic pair is h(x) in Schrittwieser et al., 2020, Appendix F
+     $/phi$ in Schrittwieser et al., 2020, Appendix F
+     """
+     support_min_max = support_size - 1
+@@ -62,7 +71,7 @@ def make_categorical_representation_fns(support_size):
+     tx = rlax.muzero_pair(num_bins=support_size,
+                         min_value=support_min,
+                         max_value=support_max,
+-                        tx=nonlinear_bellman.SIGNED_HYPERBOLIC_PAIR) # h(x) in Schrittwieser et al., 2020, Appendix F
++                        tx=nonlinear_bellman.SIGNED_HYPERBOLIC_PAIR) 
+ 
+     def scalar_to_categorical(scalar):
+         return tx.apply(scalar)
+@@ -120,4 +129,9 @@ def nonlinux_make_env(env_id, seed, num_envs, async_batch_size=1):
+ 
+     return lambda : FacadeEnvPoolEnvironment(num_envs, async_batch_size)
+     # lambda is required to mirror envpool api
+-
++    
++# def tiled_encoding(action):
++#     """Turns a scalar action into a ont-hot encoding tiled to (resolution, resolution)"""
++#     one_hot = jax.nn.one_hot(action, num_actions)
++#     reshape = jnp.reshape(one_hot, (2, 2))
++#     return jnp.tile(reshape, (embeding_resolution // 2, embeding_resolution // 2))
+\ No newline at end of file
+diff --git a/sebulla_muzero/__pycache__/actor.cpython-39.pyc b/sebulla_muzero/__pycache__/actor.cpython-39.pyc
+deleted file mode 100644
+index ac13900..0000000
+Binary files a/sebulla_muzero/__pycache__/actor.cpython-39.pyc and /dev/null differ
+diff --git a/sebulla_muzero/__pycache__/learner.cpython-39.pyc b/sebulla_muzero/__pycache__/learner.cpython-39.pyc
+deleted file mode 100644
+index c746e35..0000000
+Binary files a/sebulla_muzero/__pycache__/learner.cpython-39.pyc and /dev/null differ
+diff --git a/sebulla_muzero/__pycache__/network.cpython-39.pyc b/sebulla_muzero/__pycache__/network.cpython-39.pyc
+deleted file mode 100644
+index cbc8ba2..0000000
+Binary files a/sebulla_muzero/__pycache__/network.cpython-39.pyc and /dev/null differ
+diff --git a/sebulla_muzero/__pycache__/replay_buffer.cpython-39.pyc b/sebulla_muzero/__pycache__/replay_buffer.cpython-39.pyc
+deleted file mode 100644
+index c0e761b..0000000
+Binary files a/sebulla_muzero/__pycache__/replay_buffer.cpython-39.pyc and /dev/null differ
+diff --git a/sebulla_muzero/__pycache__/utils.cpython-39.pyc b/sebulla_muzero/__pycache__/utils.cpython-39.pyc
+deleted file mode 100644
+index 75ff031..0000000
+Binary files a/sebulla_muzero/__pycache__/utils.cpython-39.pyc and /dev/null differ
+diff --git a/sebulla_muzero/actor.py b/sebulla_muzero/actor.py
+deleted file mode 100644
+index 87a41bb..0000000
+--- a/sebulla_muzero/actor.py
++++ /dev/null
+@@ -1,326 +0,0 @@
+-import time
+-import queue
+-from collections import deque
+-
+-import jax
+-import mctx
+-import numpy as np
+-import jax.numpy as jnp
+-from flax import struct
+-
+-from learner import make_compute_value_target
+-from utils import softmax_temperature_fn
+-
+-################################################
+-#################### rollout ###################
+-# TODO: padding with priorities is avoiding the complexity of an indexing system accounting for prefix and suffix
+-# currently the solution to prefix and suffix pad with zeros to prevent sampling in the padding region
+-
+-@struct.dataclass
+-class Rollout:
+-    """A class for storing batched rollout data with methods for padding used during training."""
+-    obs: np.ndarray
+-    actions: np.ndarray
+-    value_targets: np.ndarray
+-    policy_targets: np.ndarray
+-    rewards: np.ndarray
+-    dones: np.ndarray
+-    priorities: np.ndarray
+-
+-    def prefix_padding(self, last, initial_obs, args):
+-        if last is None:
+-            prefix_obs = initial_obs.reshape(
+-                args.local_num_envs, args.num_stacked_frames, args.channels_per_frame, args.obs_resolution, args.obs_resolution
+-                )
+-            prefix_action = np.zeros((args.local_num_envs, args.num_stacked_frames), dtype=np.float32)
+-
+-        else:
+-            prefix_obs = last.obs[:, -args.num_stacked_frames:, :, :, :]
+-            prefix_action = last.actions[:, -args.num_stacked_frames:]
+-
+-        zeros_priorities = np.zeros_like(prefix_action, dtype=np.float32)
+-
+-        return self.replace(
+-            obs=np.concatenate([prefix_obs, self.obs], axis=1),
+-            actions=np.concatenate([prefix_action, self.actions], axis=1),
+-            #priorities=np.concatenate([zeros_priorities, self.priorities], axis=1),
+-        )
+-
+-    # TODO: EXTREMELY IMPORTANT
+-    # need to use np.where and dones to mask out the values that are not valid
+-    def suffix_padding(self, next, args):
+-        idx = args.num_unroll_steps + args.td_steps
+-        zeros_priorities = np.zeros_like(next.priorities[:, :idx], dtype=np.float32)
+-        return self.replace(
+-            actions=np.concatenate([self.actions, next.actions[:, :idx]], axis=1),
+-            value_targets=np.concatenate([self.value_targets, next.value_targets[:, :idx]], axis=1),
+-            policy_targets=np.concatenate([self.policy_targets, next.policy_targets[:, :idx]], axis=1),
+-            rewards=np.concatenate([self.rewards, next.rewards[:, :idx]], axis=1),
+-            dones=np.concatenate([self.dones, next.dones[:, :idx]], axis=1),
+-            #priorities=np.concatenate([self.priorities, zeros_priorities], axis=1),
+-        )
+-
+-def make_rollout_fn(actor_device, applys, args, make_env):
+-    """
+-    Currently, loops over the number of training steps to be taken 
+-    and inside each step loops over the number of steps to taken per train step 
+-    range(async_update, (num-steps + 1) * async_update)
+-    when each inner loop finished the data collected is passed to the queue via the payload variable
+-    """
+-
+-    mcts_fn = make_mcts_fn(actor_device, applys, args.total_trainsteps, args.num_simulations, args.gamma)
+-    compute_value_target = make_compute_value_target(args.num_unroll_steps, args.td_steps, args.gamma)
+-
+-    @jax.jit
+-    def make_rollout(
+-        obs: list,
+-        actions: list,
+-        pred_values: list,
+-        mcts_values: list,
+-        mcts_policies: list,
+-        rewards: list,
+-        dones: list
+-    ):
+-        obs = jnp.asarray(obs).swapaxes(0, 1)
+-        actions = jnp.asarray(actions).swapaxes(0, 1)
+-        pred_values = jnp.asarray(pred_values).swapaxes(0, 1)
+-        mcts_values = jnp.asarray(mcts_values).swapaxes(0, 1)
+-        mcts_policies = jnp.asarray(mcts_policies).swapaxes(0, 1)
+-        rewards = jnp.asarray(rewards).swapaxes(0, 1)
+-        dones = jnp.asarray(dones).swapaxes(0, 1)
+-        value_targets = compute_value_target(rewards, pred_values, dones)
+-        priorities = jnp.abs(value_targets - pred_values)
+-        return Rollout(
+-            obs=obs,
+-            actions=actions,
+-            value_targets=value_targets,
+-            policy_targets=mcts_policies,
+-            rewards=rewards,
+-            dones=dones,
+-            priorities=priorities,
+-        )
+-
+-    def rollout_fn(
+-        system: str,
+-        key: jax.random.PRNGKey,
+-        args,
+-        rollout_queue: queue.Queue,
+-        params_queue: queue.Queue,
+-        writer,
+-        device_thread_id,
+-        ):
+-        print(f"Thread {device_thread_id} started!")
+-
+-        envs = make_env(system, args.env_id, args.seed + device_thread_id, args.local_num_envs)()
+-        len_actor_device_ids = len(args.actor_device_ids)
+-        global_step = 0
+-        # TRY NOT TO MODIFY: start the game
+-        start_time = time.time()
+-
+-        # put data in the last index
+-        episode_returns = np.zeros((args.local_num_envs,), dtype=np.float32)
+-        returned_episode_returns = np.zeros((args.local_num_envs,), dtype=np.float32)
+-        episode_lengths = np.zeros((args.local_num_envs,), dtype=np.float32)
+-        returned_episode_lengths = np.zeros((args.local_num_envs,), dtype=np.float32)
+-        envs.async_reset()
+-
+-        params_queue_get_time = deque(maxlen=10)
+-        rollout_time = deque(maxlen=10)
+-        rollout_queue_put_time = deque(maxlen=10)
+-        actor_policy_version = 0
+-
+-        params = None
+-        last_rollout = None
+-        while True:
+-            update_time_start = time.time()
+-            obs = []
+-            dones = []
+-            actions = []
+-            rewards = []
+-            pred_values = []
+-            mcts_values = []
+-            mcts_policies = []
+-            truncations = []
+-            terminations = []
+-            env_recv_time = 0
+-            inference_time = 0
+-            storage_time = 0
+-            env_send_time = 0
+-
+-            # get params
+-            if params is None:
+-                params_queue_get_time_start = time.time()
+-                params = params_queue.get()
+-                actor_policy_version += 1
+-                params_queue_get_time.append(time.time() - params_queue_get_time_start)
+-                writer.add_scalar("stats/params_queue_get_time", np.mean(params_queue_get_time), global_step)
+-
+-            rollout_time_start = time.time()
+-            for timestep in range(0, args.num_steps):
+-                env_recv_time_start = time.time()
+-                next_obs, next_reward, next_done, _, info = envs.recv() # TODO: resolve pitch variable origin
+-                env_recv_time += time.time() - env_recv_time_start
+-                global_step += len(next_done) * len_actor_device_ids * args.world_size
+-                env_id = info['env_id']
+-
+-                if timestep == 0:
+-                    initial_obs = next_obs
+-                    action_stack = np.zeros((args.num_stacked_frames, args.local_num_envs))
+-
+-                elif timestep < args.num_stacked_frames + 1:
+-                    num_missing = args.num_stacked_frames - timestep
+-                    missing_actions = np.zeros((num_missing, args.local_num_envs))
+-                    current_actions = np.stack(actions)
+-                    action_stack = np.concatenate((missing_actions, current_actions))
+-
+-                # TODO: fix recompilation on 33rd iteration
+-                else:
+-                    action_stack = actions[-args.num_stacked_frames:]
+-                    action_stack = np.stack(action_stack)
+-
+-                action_stack = action_stack.transpose(1, 0)
+-                assert action_stack.shape == (args.local_num_envs, args.num_stacked_frames)
+-
+-                inference_time_start = time.time()
+-                action, pred_value, mcts_value, mcts_policy, key = mcts_fn(params, next_obs, action_stack, 0, key)
+-                # if timestep % 10 == 0:
+-                #     print(f"Thread {device_thread_id} finished {timestep} in {time.time() - inference_time_start}")
+-                inference_time += time.time() - inference_time_start
+-
+-                action = jax.device_get(action)
+-                pred_value = jax.device_get(pred_value)
+-                mcts_value = jax.device_get(mcts_value)
+-                mcts_policies = jax.device_get(mcts_policies)
+-                key = jax.device_get(key)
+-
+-                env_send_time_start = time.time()
+-                envs.send(np.array(action), env_id)
+-                env_send_time += time.time() - env_send_time_start
+-                storage_time_start = time.time()
+-                obs.append(next_obs[:, -args.channels_per_frame:, :, :])
+-                dones.append(next_done)
+-                actions.append(action)
+-                pred_values.append(pred_value)
+-                mcts_values.append(mcts_value)
+-                mcts_policies.append(mcts_policy)
+-                rewards.append(next_reward)
+-                truncated = info["elapsed_step"] >= envs.spec.config.max_episode_steps
+-                truncations.append(truncated)
+-                terminations.append(info["terminated"])
+-                
+-                episode_returns[env_id] += info["reward"]
+-                returned_episode_returns[env_id] = np.where(
+-                    info["terminated"] + truncated, episode_returns[env_id], returned_episode_returns[env_id]
+-                )
+-                episode_returns[env_id] *= (1 - info["terminated"]) * (1 - truncated)
+-                episode_lengths[env_id] += 1
+-                returned_episode_lengths[env_id] = np.where(
+-                    info["terminated"] + truncated, episode_lengths[env_id], returned_episode_lengths[env_id]
+-                )
+-                episode_lengths[env_id] *= (1 - info["terminated"]) * (1 - truncated)
+-                storage_time += time.time() - storage_time_start
+-            
+-            if args.profile:
+-                action.block_until_ready()
+-
+-            # logs
+-            rollout_time.append(time.time() - rollout_time_start)
+-            writer.add_scalar("stats/rollout_time", np.mean(rollout_time), global_step)
+-
+-            avg_episodic_return = np.mean(returned_episode_returns)
+-            writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, global_step)
+-            writer.add_scalar("charts/avg_episodic_length", np.mean(returned_episode_lengths), global_step)
+-            print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}")
+-            print("SPS:", int(global_step / (time.time() - start_time)))
+-            writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+-
+-            writer.add_scalar("stats/truncations", np.sum(truncations), global_step)
+-            writer.add_scalar("stats/terminations", np.sum(terminations), global_step)
+-            writer.add_scalar("stats/env_recv_time", env_recv_time, global_step)
+-            writer.add_scalar("stats/inference_time", inference_time, global_step)
+-            writer.add_scalar("stats/storage_time", storage_time, global_step)
+-            writer.add_scalar("stats/env_send_time", env_send_time, global_step)
+-            # `make_bulk_array` is actually important. It accumulates the data from the lists
+-            # into single bulk arrays, which later makes transferring the data to the learner's
+-            # device slightly faster. See https://wandb.ai/costa-huang/cleanRL/reports/data-transfer-optimization--VmlldzozNjU5MTg1
+-            #if args.learner_device_ids[0] != args.actor_device_ids[0]:
+-            current_rollout = make_rollout(
+-                obs,
+-                actions,
+-                pred_values,
+-                mcts_values,
+-                mcts_policies,
+-                rewards,
+-                dones
+-            )
+-
+-            current_rollout = current_rollout.prefix_padding(last_rollout, initial_obs, args)
+-            if last_rollout is not None:
+-                last_rollout = last_rollout.suffix_padding(current_rollout, args)
+-                payload_rollout = last_rollout
+-
+-                # store data
+-                rollout_queue_put_time_start = time.time()
+-                rollout_queue.put(payload_rollout)
+-                print(f"Thread {device_thread_id} placed a batch in queue in {time.time() - update_time_start}")
+-                rollout_queue_put_time.append(time.time() - rollout_queue_put_time_start)
+-                writer.add_scalar("stats/rollout_queue_put_time", np.mean(rollout_queue_put_time), global_step)
+-
+-            last_rollout = current_rollout
+-
+-            writer.add_scalar(
+-                "charts/SPS_update",
+-                int(
+-                    args.local_num_envs
+-                    * args.num_steps
+-                    * len_actor_device_ids
+-                    * args.world_size
+-                    / (time.time() - update_time_start)
+-                ),
+-                global_step,
+-            )
+-    return rollout_fn
+-
+-
+-def make_mcts_fn(actor_device, applys, train_steps, num_simulations, gamma):
+-
+-        def recurrent_fn(params, rng, action, prev_embedding):
+-            embedding, reward, value, policy = applys.recurrent_inference(
+-                params, prev_embedding, action, scalar=True
+-            )
+-            discount = jnp.full_like(reward, gamma)
+-            output = mctx.RecurrentFnOutput(
+-                reward=reward,
+-                discount=discount,
+-                prior_logits=policy,
+-                value=value,
+-            )
+-            return (output, embedding)
+-
+-        def mcts(params, observations, actions, train_step, rng):
+-            rng, _ = jax.random.split(rng)
+-            embedding, value, policy = applys.initial_inference(
+-                params, observations, actions, scalar=True
+-            )
+-            root = mctx.RootFnOutput(
+-                prior_logits=policy,
+-                value=value,
+-                embedding=embedding
+-            )
+-            output = mctx.muzero_policy(
+-                params=params,
+-                rng_key=rng,
+-                root=root,
+-                recurrent_fn=recurrent_fn,
+-                num_simulations=num_simulations,
+-                #temperature=softmax_temperature_fn(train_step, train_steps)
+-            )
+-            actions = output['action']
+-            pred_value = value
+-            node_value = output['search_tree']['node_values'][:, 0]
+-            search_policy = output['action_weights']
+-            
+-            # TODO: need to resolve, do we use node_value or pred_value?
+-            return actions, pred_value, node_value, search_policy, rng
+- 
+-        return jax.jit(mcts, device=actor_device)
+diff --git a/sebulla_muzero/learner.py b/sebulla_muzero/learner.py
+deleted file mode 100644
+index a3692e9..0000000
+--- a/sebulla_muzero/learner.py
++++ /dev/null
+@@ -1,109 +0,0 @@
+-import jax
+-import rlax
+-import optax
+-import jax.numpy as jnp
+-
+-"""every batch that comes in needs to be 
+-    obs.shape (batch_dim, 32+5, 3, 86, 86)
+-    actions.shape (batch_dim, 32+5,)
+-    else.shape (batch_dim, 5, *else.shape[1:])
+-    then:
+-         intial_obs = obs[:, :32, 3, 86, 86].reshape(-1, 32*3, -1, -1)
+-         intial_actions = actions[:, :32]
+-         representation_network_input = np.hstack(initial_obs, intial_actions)
+-    """
+-
+-def make_single_device_update(applys, optimizer, config):
+-    args = config.args
+-    
+-    def softmax_cross_entropy(logits, labels):
+-        return -jnp.sum(labels * jax.nn.log_softmax(logits, axis=-1), axis=-1)
+-
+-    # TODO: add in gradient clipping and stuff
+-    def loss_fn(params, batch):
+-        K = args.num_unroll_steps
+-        v_loss, p_loss, r_loss = 0, 0, 0
+-
+-        # initial inference
+-        obs_stack = batch.observation.reshape((-1, *args.obs_shape))
+-        action_stack = batch.actions[:, :-K]
+-        embedding, value, policy = applys.initial_inference(params, obs_stack, action_stack)
+-        v_loss = jnp.add(v_loss, softmax_cross_entropy(value, batch.value[:, -K]))
+-        p_loss = jnp.add(p_loss, softmax_cross_entropy(policy, batch.policy[:, -K]))
+-
+-        # unroll model with recurrent inference for K steps
+-        h_k = embedding
+-        unroll_actions = batch.actions[:, -K:]
+-        for k in range(K):
+-            h_kp1, r_k, v_k, p_k  = applys.recurrent_inference(params, h_k, unroll_actions[:, k])
+-            v_loss = jnp.add(v_loss, softmax_cross_entropy(v_k, batch.value[:, k]))
+-            p_loss = jnp.add(p_loss, softmax_cross_entropy(p_k, batch.policy[:, k]))
+-            r_loss = jnp.add(r_loss, softmax_cross_entropy(r_k, batch.reward[:, k]))
+-            h_k = h_kp1
+-
+-        v_loss = v_loss / K
+-        p_loss = p_loss / K
+-        r_loss = r_loss / K
+-
+-        loss = v_loss + p_loss + r_loss
+-        return loss, (v_loss, p_loss, r_loss)
+-
+-    value_and_grad = jax.value_and_grad(loss_fn, has_aux=True)
+-
+-    def single_device_update(muzero_state, batch):
+-        (loss, (v_loss, p_loss, r_loss)), grads = value_and_grad(muzero_state.params, batch)
+-        grads = jax.lax.pmean(grads, axis_name="local_devices")
+-        updates, new_opt_state = optimizer.update(grads, muzero_state.opt_state)
+-        new_params = optax.apply_updates(muzero_state.params, updates)
+-        muzero_state.replace(
+-            params=new_params,
+-            opt_state=new_opt_state,
+-            train_step=muzero_state.train_step + 1
+-        )
+-        return muzero_state, loss, v_loss, p_loss, r_loss
+-    return single_device_update
+-
+-
+-def make_prepare_data_fn(args, learner_devices, scalar_to_categorical):
+-    """
+-    Creates a function that turns data generated by the parallel environment into a batch of data
+-    i.e. (time_dim, batch_dim, *x.shape) -> (batch_dim, *x.shape) where x is (obs, dones, values, actions, etc.)
+-    """
+-
+-    compute_value_target = make_compute_value_target(args.num_unroll_steps, args.td_steps, args.gamma)
+-
+-    def prepare_data(
+-        obs: list,
+-        dones: list,
+-        values: list,
+-        actions: list,
+-        mcts_policies: list,
+-        rewards: list,
+-    ):
+-        obs = jnp.asarray(obs, dtype=jnp.float32)
+-        actions = jnp.asarray(actions, dtype=jnp.float32)
+-        mcts_policies = jnp.asarray(mcts_policies, dtype=jnp.float32)
+-        rewards = jnp.asarray(rewards, dtype=jnp.float32)
+-        values = jnp.asarray(values, dtype=jnp.float32)
+-        dones = jnp.asarray(dones)
+-        value_targets = compute_value_target(rewards, values, dones)
+-        
+-        rewards = scalar_to_categorical(rewards)    
+-        value_targets = scalar_to_categorical(value_targets)
+-        
+-        return obs, actions, mcts_policies, rewards, value_targets
+-
+-    return jax.jit(prepare_data, device=learner_devices[0])
+-
+-def make_compute_value_target(num_unroll_steps, td_steps, gamma):
+-    td_steps = jnp.array(td_steps, dtype=jnp.float32)
+-
+-    def compute_value_target_fn(rewards, values, dones):
+-        discounts = jnp.zeros_like(rewards, dtype=jnp.float32)
+-        discounts = jnp.where(dones, 0.0, gamma)
+-
+-        value_targets = rlax.n_step_bootstrapped_returns(rewards, discounts, values, num_unroll_steps, td_steps)
+-
+-        return value_targets
+-
+-    return jax.vmap(compute_value_target_fn)
+\ No newline at end of file
+diff --git a/sebulla_muzero/main.py b/sebulla_muzero/main.py
+deleted file mode 100644
+index d0d5155..0000000
+--- a/sebulla_muzero/main.py
++++ /dev/null
+@@ -1,361 +0,0 @@
+-import platform
+-import argparse
+-import os
+-import random
+-import time
+-import uuid
+-from collections import deque
+-from distutils.util import strtobool
+-from functools import partial
+-from typing import Sequence
+-from types import SimpleNamespace
+-
+-os.environ[
+-    "XLA_PYTHON_CLIENT_MEM_FRACTION"
+-] = "0.6"  # see https://github.com/google/jax/discussions/6332#discussioncomment-1279991
+-os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=false " "intra_op_parallelism_threads=1"
+-import queue
+-import threading
+-
+-system = platform.system()
+-print(system)
+-if system == "Linux":
+-    import envpool
+-    from jax_smi import initialise_tracking
+-    initialise_tracking()
+-else:
+-    print("envpool is not supported on non Linux systems")
+-import gym
+-import jax
+-import jax.numpy as jnp
+-import numpy as np
+-import rlax
+-import flax
+-import optax
+-import haiku as hk
+-from tensorboardX import SummaryWriter
+-
+-from utils import TrainState, nonlinux_make_env, make_categorical_representation_fns, make_action_encoding_fn
+-from network import make_muzero_network, NetworkApplys
+-from actor import make_rollout_fn, make_mcts_fn
+-from learner import make_prepare_data_fn, make_single_device_update
+-from replay_buffer import start_replay_buffer_manager
+-
+-def parse_args():
+-    # fmt: off
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument("--exp-name", type=str, default=os.path.basename(__file__).rstrip(".py"),
+-        help="the name of this experiment")
+-    parser.add_argument("--seed", type=int, default=1,
+-        help="seed of the experiment")
+-    parser.add_argument("--save-model", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+-        help="whether to save model into the `runs/{run_name}` folder")
+-    parser.add_argument("--env-id", type=str, default="Breakout-v5",
+-        help="the id of the environment")
+-    parser.add_argument("--gray_scale", type=bool, default=False,
+-        help="the id of the environment")
+-    parser.add_argument("--total_trainsteps", type=int, default=1_000_000,
+-        help="total timesteps of the experiments")
+-    parser.add_argument("--local-num-envs", type=int, default=20,
+-        help="the number of parallel game environments")
+-    # parser.add_argument("--num-steps", type=int, default=1000,
+-    #     help="the number of steps to run in each environment per rollout")
+-    parser.add_argument("--batch-size", type=float, default=1024,
+-        help="Batch size")
+-    parser.add_argument("--learning-rate", type=float, default=10e-4,
+-        help="Initial learning rate for Adam optimizer")
+-    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+-        help="Toggle learning rate annealing for policy and value networks")
+-    parser.add_argument("--weight-decay", type=float, default=20e-5,
+-        help="Weight decay for Adam optimizer")
+-    parser.add_argument("--num-unroll-steps", type=int, default=5,
+-        help="the number of steps to unroll the model in training")
+-    parser.add_argument("--td-steps", type=int, default=5,
+-        help="the discount factor gamma")
+-    parser.add_argument("--gamma", type=float, default=0.997,
+-        help="the discount factor gamma")
+-    parser.add_argument("--num-simulations", type=float, default=50,
+-        help="number of mcts iterations per action selection")
+-    parser.add_argument("--support-size", type=int, default=601,
+-        help="coefficient of the value function")
+-    parser.add_argument("--num-stacked-frames", type=int, default=32,
+-        help="number of historical observation frames used to produce initial embedding")
+-    parser.add_argument("--obs-resolution", type=int, default=84,
+-        help="atari observation resolution")
+-    parser.add_argument("--embedding-resolution", type=int, default=6,
+-        help="learned embedding resolution")
+-    parser.add_argument("--update-epochs", type=int, default=4,
+-        help="the K epochs to update the policy")
+-    parser.add_argument("--clip-coef", type=float, default=0.1,
+-        help="the latent representation clipping coefficient")
+-    parser.add_argument("--value-coef", type=float, default=0.5,
+-        help="coefficient of the value function")
+-    parser.add_argument("--buffer-size", type=float, default=10,
+-        help="maximum number of sequences in the replay buffer")
+-    parser.add_argument("--sequence-length", type=float, default=500,
+-        help="maximum length of a sequence in the replay buffer")
+-
+-    # resource managment
+-    parser.add_argument("--actor-device-ids", type=int, nargs="+", default=[0, 1],#, 1],
+-        help="the device ids that actor workers will use (currently only support 1 device)")
+-    parser.add_argument("--num-actor-threads", type=int, default=3,
+-        help="the number of actor threads to use per core")
+-    parser.add_argument("--learner-device-ids", type=int, nargs="+", default=[2, 3],
+-        help="the device ids that learner workers will use")
+-    parser.add_argument("--distributed", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+-        help="whether to use `jax.distirbuted`")
+-    parser.add_argument("--profile", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+-        help="whether to call block_until_ready() for profiling")
+-    parser.add_argument("--test-actor-learner-throughput", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+-        help="whether to test actor-learner throughput by removing the actor-learner communication")
+-
+-    args = parser.parse_args()
+-    args.num_steps = args.sequence_length
+-    args.channels_per_frame = 1 if args.gray_scale else 3
+-    return args
+-
+-
+-ATARI_MAX_FRAMES = int(
+-    108000 / 4 # from cleanba code
+-)
+-
+-# TODO: change this to *args
+-def make_env_helper(system, env_id, seed, local_num_envs):
+-    if system == "Linux":
+-        return make_env(env_id, seed, local_num_envs)
+-    else:
+-        return nonlinux_make_env(env_id, seed, local_num_envs)
+-
+-def make_env(env_id, seed, num_envs):
+-    def thunk():
+-        envs = envpool.make(
+-            env_id,
+-            env_type="gym",
+-            num_envs=num_envs,
+-            stack_num=args.num_stacked_frames,
+-            gray_scale=args.gray_scale,
+-            episodic_life=True,  # Espeholt et al., 2018, Tab. G.1
+-            repeat_action_probability=0,  # Hessel et al., 2022 (Muesli) Tab. 10
+-            noop_max=30,  # Espeholt et al., 2018, Tab. C.1 "Up to 30 no-ops at the beginning of each episode."
+-            full_action_space=False,  # Espeholt et al., 2018, Appendix G., "Following related work, experts use game-specific action sets."
+-            max_episode_steps=ATARI_MAX_FRAMES,  # Hessel et al. 2018 (Rainbow DQN), Table 3, Max frames per episode
+-            reward_clip=True,
+-            seed=seed,
+-        )
+-        envs.num_envs = num_envs
+-        envs.single_action_space = envs.action_space
+-        envs.single_observation_space = envs.observation_space
+-        envs.is_vector_env = True
+-        return envs
+-
+-    return thunk
+-
+-
+-class MuZeroAtariConfig:
+-    def __init__(self, args):
+-        self.args = args
+-        self.scalar_to_categorical, self.categorical_to_scalar = make_categorical_representation_fns(args.support_size)
+-        self.tiled_action_encoding_fn, self.bias_plane_action_encoding_fn = make_action_encoding_fn(
+-            args.embedding_resolution, args.obs_resolution, args.num_actions
+-        )
+-
+-
+-if __name__ == "__main__":
+-    args = parse_args()
+-    # TODO: setup jax distributed
+-    
+-    args.world_size = jax.process_count()
+-    args.local_rank = jax.process_index()
+-    args.num_envs = args.local_num_envs * args.world_size
+-    local_devices = jax.local_devices()
+-    global_devices = jax.devices()
+-    learner_devices = [local_devices[d_id] for d_id in args.learner_device_ids]
+-    actor_devices = [local_devices[d_id] for d_id in args.actor_device_ids]
+-    print("learner_devices", learner_devices)
+-    print("actor_devices", actor_devices)
+-    global_learner_decices = [
+-        global_devices[d_id + process_index * len(local_devices)]
+-        for process_index in range(args.world_size)
+-        for d_id in args.learner_device_ids
+-    ]
+-    global_actor_decices = [
+-        global_devices[d_id + process_index * len(local_devices)]
+-        for process_index in range(args.world_size)
+-        for d_id in args.actor_device_ids
+-    ]
+-    print("global_learner_decices", len(global_learner_decices))
+-    print("global_actor_decices", len(global_actor_decices))
+-    args.global_learner_decices = [str(item) for item in global_learner_decices]
+-    args.actor_devices = [str(item) for item in actor_devices]
+-    args.learner_devices = [str(item) for item in learner_devices]
+-    
+-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{uuid.uuid4()}"
+-
+-    writer = SummaryWriter(f"runs/{run_name}")
+-    writer.add_text(
+-        "hyperparameters",
+-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+-    )
+-
+-    # TRY NOT TO MODIFY: seeding
+-    random.seed(args.seed)
+-    np.random.seed(args.seed)
+-    key = jax.random.PRNGKey(args.seed)
+-    key, network_key, buffer_key = jax.random.split(key, 3)
+-
+-    # env setup
+-    envs = make_env_helper(system, args.env_id, args.seed, args.local_num_envs)()
+-    args.obs_shape = envs.observation_space.shape
+-    args.num_actions = envs.single_action_space.n
+-    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+-
+-
+-    config = MuZeroAtariConfig(args)
+-    ############################### Setup Network, Optimizer, and Update Function #######################################
+-
+-    def cosine_scheduler(t):
+-        lr_decay =  0.5 * (1 + jnp.cos(jnp.pi * t / args.num_updates)) 
+-        return lr_decay * args.lr_init
+-
+-    network = make_muzero_network(config)
+-    applys = NetworkApplys(*network.apply)
+-
+-    init_obs = jnp.zeros((args.local_num_envs,  *args.obs_shape))
+-    init_action = jnp.zeros((args.local_num_envs, args.num_stacked_frames))
+-    network_params = network.init(network_key, init_obs, init_action)
+-    # TODO: resolve optimizer
+-    # optimizer = optax.scale_by_adam(eps=1e-8)
+-    # optimizer = optax.chain(
+-    #     optimizer,
+-    #     optax.add_decayed_weights(args.weight_decay / args.lr_init))
+-    # optimizer = optax.chain(optimizer, optax.scale_by_schedule(cosine_scheduler),
+-    #                         optax.scale(-1.0)) # -1.0 indicates we're minimizing the loss
+-    optimizer = optax.adam(1e-2)#args.learning_rate)
+-    opt_state = optimizer.init(network_params)
+-    muzero_state = TrainState(params=network_params,
+-                            target_params=network_params,
+-                            opt_state=opt_state,
+-                            train_step=0)
+-
+-    muzero_state = jax.device_put_replicated(muzero_state, devices=learner_devices)
+-
+-    #prepare_data_fn = make_prepare_data_fn(args, learner_devices, scalar_to_categorical)
+-    single_device_update = make_single_device_update(applys, optimizer, config)
+-    multi_device_update = jax.pmap(
+-        single_device_update,
+-        axis_name="local_devices",
+-        devices=global_learner_decices,
+-    )
+-
+-    ######################## Dispatch Actors ###########################
+-
+-    import multiprocessing as mp
+-    num_cpus = mp.cpu_count()
+-    print(f"num_cpus {num_cpus}")
+-    fair_num_cpus = num_cpus // len(args.actor_device_ids) 
+-    dummy_writer = SimpleNamespace()
+-    dummy_writer.add_scalar = lambda x,y,z: None
+-
+-    rollout_queue = queue.Queue(maxsize=20)#args.num_actor_threads * len(args.actor_device_ids))
+-    params_queues = []
+-
+-    for d_idx, d_id in enumerate(args.actor_device_ids):
+-        device_params = jax.device_put(flax.jax_utils.unreplicate(muzero_state.params), local_devices[d_id])
+-        rollout_fn = make_rollout_fn(local_devices[d_id], applys, args, make_env_helper)
+-        for thread_id in range(args.num_actor_threads):
+-            params_queue = queue.Queue(maxsize=1)
+-            params_queue.put(device_params)
+-            threading.Thread(
+-                target=rollout_fn,
+-                args=(
+-                    system,
+-                    jax.device_put(key, local_devices[d_id]),
+-                    args,
+-                    rollout_queue,
+-                    params_queue,
+-                    writer if d_idx == 0 and thread_id == 0 else dummy_writer,
+-                    d_idx * args.num_actor_threads + thread_id,
+-                ),
+-            ).start()
+-            params_queues.append(params_queue)
+-
+-    batch_queue = queue.Queue(maxsize=5) # arbitrary
+-    start_replay_buffer_manager(rollout_queue, batch_queue, config) # TODO: may want to include some logging inside this thread to monitor the replay buffer
+-
+-    batch_queue_get_time = deque(maxlen=10)
+-    data_transfer_time = deque(maxlen=10)
+-    learner_network_version = 0
+-    while True:
+-        update_iteration_start = time.time()
+-        learner_network_version += 1
+-
+-        batch_queue_get_start = time.time()
+-        (batch, weights, sampled_indicies) = batch_queue.get()
+-        batch_queue_get_time.append(time.time() - batch_queue_get_start)
+-        writer.add_scalar("stats/batch_queue_get_time", np.mean(batch_queue_get_time), learner_network_version)
+-
+-        device_transfer_start = time.time()
+-        shard_fn = lambda x: jax.device_put_sharded(
+-            jnp.array_split(x, len(learner_devices), axis=0),
+-            learner_devices
+-        )
+-        sharded_batch = jax.tree_map(shard_fn, batch)
+-        writer.add_scalar("stats/learner/data_transfer_time", time.time() - device_transfer_start, learner_network_version)
+-
+-        training_time_start = time.time()
+-        muzero_state, loss, v_loss, p_loss, r_loss = multi_device_update(
+-                muzero_state, sharded_batch
+-        )
+-        writer.add_scalar("stats/training_time", time.time() - training_time_start, learner_network_version)
+-        writer.add_scalar("stats/rollout_queue_size", rollout_queue.qsize(), learner_network_version)
+-        writer.add_scalar("stats/batch_queue_size", batch_queue.qsize(), learner_network_version)
+-
+-        # writer.add_scalar("stats/training_time", time.time() - training_time_start, global_step)
+-        # writer.add_scalar("stats/rollout_queue_size", rollout_queue.qsize(), global_step)
+-        # writer.add_scalar("stats/params_queue_size", params_queue.qsize(), global_step)
+-        # print(
+-        #     global_step,
+-        #     f"actor_policy_version={actor_network_version}, learner_policy_version={learner_network_version}, training time: {time.time() - training_time_start}s", # learner_network_version
+-        # )
+-
+-        # TRY NOT TO MODIFY: record rewards for plotting purposes
+-        #writer.add_scalar("charts/learning_rate", muzero.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
+-        writer.add_scalar("losses/value_loss", np.mean(v_loss).item(), learner_network_version)
+-        writer.add_scalar("losses/policy_loss", np.mean(p_loss).item(), learner_network_version)
+-        writer.add_scalar("losses/reward_loss", np.mean(r_loss).item(), learner_network_version)
+-        writer.add_scalar("losses/loss", np.mean(loss), learner_network_version)
+-        
+-        # update network version
+-        
+-        # if update >= args.num_updates:
+-        #     break
+-            # for d_idx, d_id in enumerate(args.actor_device_ids):
+-            #     device_params = jax.device_put(flax.jax_utils.unreplicate(muzero_state.params), local_devices[d_id])
+-            #     for thread_id in range(args.num_actor_threads):
+-            #         params_queues[d_idx * args.num_actor_threads + thread_id].put(device_params)
+-
+-    """ 
+-    batch contents 
+-        observation_stack: (1024, 94, 84, 84)
+-            (batch_size, num_stacked_frames*3, *observation_shape)
+-        actions: (1024, 32+5)
+-            (batch_size, num_stacked_frames+num_unroll_steps)
+-        value_targets: (1024, 6, 601)
+-            (batch_size, num_unroll_steps+1, support_size)
+-        policy_targets: (1024, 6, 4)
+-            (batch_size, num_unroll_steps+1, num_actions)
+-        reward_targets: (1024, 5, 601)
+-            (batch_size, num_unroll_steps, support_size)
+-    """
+-
+-    # Efficient Zero obviously is an implementation of Atari scale replay buffer, you can see how they did it
+-    # for now get MuZero completely working on DMControl
+-    # much smaller memory needs and much faster training
+-    # Will need to change
+-        # network arch
+-        # observation and action stacking 
+-        # parallel mcts per action dimension
+-        # replay buffer
+-
+-
+-    # so priorities are updated 
+\ No newline at end of file
+diff --git a/sebulla_muzero/network.py b/sebulla_muzero/network.py
+deleted file mode 100644
+index 62df282..0000000
+--- a/sebulla_muzero/network.py
++++ /dev/null
+@@ -1,211 +0,0 @@
+-import jax
+-import jax.numpy as jnp
+-import haiku as hk
+-import chex
+-from flax import struct
+-
+-from utils import make_action_encoding_fn, make_categorical_representation_fns
+-
+-nonlinearity = jax.nn.relu
+-
+-class ResNetv2Block(hk.Module):
+-
+-    def __init__(self, channels, name, use_projection=False):
+-        block_name ='resnetv2_block_linear_' + name
+-        super().__init__(name=block_name)
+-        
+-        self.use_projection = use_projection
+-        if use_projection:
+-            self.projection = hk.Conv2D(channels, kernel_shape=3)
+-        
+-        conv_0 = hk.Conv2D(channels, kernel_shape=3)
+-        ln_0 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
+-        conv_1 = hk.Conv2D(channels, kernel_shape=3)
+-        ln_1 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
+-
+-        self.layers = ((conv_0, ln_0), (conv_1, ln_1))
+-
+-    def __call__(self, input):
+-        x = shortcut = input
+-        
+-        if self.use_projection:
+-            shortcut = self.projection(shortcut)
+-
+-        for (conv, layer_norm) in (self.layers):
+-            x = layer_norm(x)
+-            x = nonlinearity(x)
+-            x = conv(x)
+-
+-        return x + shortcut
+-
+-def make_tower(num_blocks, channels, use_projection=False, tower_id=None):
+-    tower = []
+-    for i in range(num_blocks):
+-        block_name = tower_id + str(i) if tower_id else str(i)
+-        
+-        if use_projection and i == 0:
+-            block = ResNetv2Block(channels, name=block_name, use_projection=True)
+-        else:
+-            block = ResNetv2Block(channels, name=block_name)
+-        tower.append(block)
+-        
+-    return hk.Sequential(tower)
+-
+-class RepresentationNetwork(hk.Module):
+-    """
+-    Maps input observation of shape (batch_dim, 96, 96, 128)
+-        - 96x96 atari resolution
+-        - 128 channels composed of (96 + 32)
+-            - 32 history frames of 3 colors each = 96 channels
+-            - 32 actions broadcasted to (96, 96) 
+-    Schrittwieser et al., 2020, Appendix F
+-    """
+-    def __init__(self, name='h'):
+-        super().__init__(name=name)
+-
+-        self.conv_0 = hk.Conv2D(128, kernel_shape=3, stride=2) # (48, 48)
+-        self.tower_0 = make_tower(2, 128, tower_id='a')
+-        
+-        self.conv_1 = hk.Conv2D(256, kernel_shape=3, stride=2) # (24, 24)
+-        self.tower_1 = make_tower(3, 256, tower_id='b')
+-
+-        
+-        self.pooling_2 = hk.AvgPool(window_shape=(12, 12), strides=2, padding="SAME") # (12, 12)
+-        self.tower_2 = make_tower(3, 256, tower_id='c')
+-        
+-        self.pooling_final = hk.AvgPool(window_shape=(6, 6), strides=2, padding="SAME") # (6, 6)
+-
+-    def __call__(self, input):
+-        # assert input.shape == (batch_dim, 96, 96, 128)
+-        x = jnp.transpose(input, (0, 2, 3, 1))
+-        #x = x / (255.0)
+-        x = self.conv_0(x)
+-        x = self.tower_0(x)
+-        x = self.conv_1(x)
+-        x = self.tower_1(x)
+-        x = self.pooling_2(x)
+-        x = self.tower_2(x)
+-        embedding = self.pooling_final(x)
+-        # assert shape = (batch_dim, 6, 6, 256)
+-        return embedding
+-
+-class DynamicsNetwork(hk.Module):
+-    """
+-    Maps embedding of shape (batch_dim, 6, 6, 256) and action of shape (batch_dim, 6, 6)
+-    Stacked along channel dimension to (batch_dim, 6, 6, 257)
+-
+-    """
+-    def __init__(self, num_blocks, num_hiddens, support_size, action_encoding_fn, name='g'):
+-        super().__init__(name=name)
+-        self.torso = make_tower(num_blocks, num_hiddens, use_projection=True)
+-        self.reward_head = hk.Sequential([hk.Conv2D(16, kernel_shape=1), nonlinearity,
+-                                          hk.Flatten(-3), hk.Linear(support_size)]) # (AlphaGoZero) Silver et al., 2016 Methods: Neural Network Architecture NOTE: AlphaGoZero uses 2
+-
+-        self.action_encoding_fn = action_encoding_fn
+-
+-    def __call__(self, embedding, action):
+-        action_encoding = self.action_encoding_fn(action)
+-        action_encoding = jnp.expand_dims(action_encoding, axis=-1)
+-        x = jnp.concatenate((embedding, action_encoding), axis=-1)
+-
+-        next_embedding = self.torso(x)
+-        reward = self.reward_head(next_embedding)
+-
+-        return next_embedding, reward
+-
+-class PredictionNetwork(hk.Module):
+-    """ 
+-    Maps embedding of shape (batch_dim, 6, 6, 256) to policy and value
+-
+-    "The prediction function uses the same architecture as AlphaZero:
+-    one or two convolutional layers that preserve the resolution but reduce the number of planes,
+-    followed by a fully connected layer to the size of the output." - Schrittwieser et al., 2020, Section 4
+-
+-    Couldn't find network architecture in AlphaZero paper, but current is per AlphaGoZero Paper.
+-    """
+-    def __init__(self, support_size, num_actions, name='f'):
+-        super().__init__(name=name)
+-        # NOTE: may need to make this larger
+-        self.value_head = hk.Sequential([hk.Conv2D(1, kernel_shape=1), nonlinearity,
+-                                         hk.Flatten(-3), hk.Linear(support_size)])
+-        self.policy_head = hk.Sequential([hk.Conv2D(2, kernel_shape=1), nonlinearity,
+-                                         hk.Flatten(-3), hk.Linear(num_actions)])
+-
+-    def __call__(self, embedding):
+-        value = self.value_head(embedding)
+-        policy = self.policy_head(embedding)
+-
+-        return value, policy
+-
+-def make_muzero_network(config):
+-    """
+-    Creates a MuZero network composed of:
+-        h(x) Representation Network
+-            - maps observations to an embedding
+-        g(x) Dynamics Network
+-            - maps embedding and action to next embedding and reward
+-        f(x) Prediction Network
+-            - maps embedding to policy and value
+-    """
+-    num_blocks = 10
+-    num_hiddens = 256
+-    support_size = config.args.support_size
+-    num_actions = config.args.num_actions
+-
+-    def fn():
+-        representation_net = RepresentationNetwork()
+-        dynamics_net = DynamicsNetwork(num_blocks, num_hiddens, support_size, config.tiled_action_encoding_fn)
+-        prediction_net = PredictionNetwork(support_size, num_actions)
+-
+-        # NOTE: batch size need to be dynamic to accomodate inference and training
+-        def make_initial_encoding(obs, action):
+-            obs = obs / 255.0
+-            action = config.bias_plane_action_encoding_fn(action) 
+-            encoding = jnp.concatenate([obs, action], axis=1)
+-            assert encoding.shape[1:] == (128, 84, 84) or encoding.shape[1:] == (64, 84, 84)
+-            return encoding 
+-
+-        def initial_inference(observations, actions, scalar=False):
+-            input = make_initial_encoding(observations, actions)
+-            embedding = representation_net(input)
+-            value, policy = prediction_net(embedding)
+-            value = config.categorical_to_scalar(value) if scalar else value
+-            return embedding, value, policy
+-
+-        def recurrent_inference(embedding, action, scalar=False):
+-            next_embedding, reward = dynamics_net(embedding, action)
+-            value, policy = prediction_net(next_embedding)
+-            reward = config.categorical_to_scalar(reward) if scalar else reward
+-            value = config.categorical_to_scalar(value) if scalar else value
+-            return embedding, reward, value, policy
+-
+-        def init(observation, actions):
+-            """ This is only used to initialize the params. Never for inference. """
+-            chex.assert_rank([observation, actions], [4, 2]) 
+-            
+-            embedding, _, _ = initial_inference(observation, actions)
+-            dummy_action = actions[:, -1].squeeze()
+-            next_embedding, reward, value, policy = recurrent_inference(embedding, dummy_action)
+-
+-            return NetworkOutput(embedding=embedding,
+-                                next_embedding=next_embedding,
+-                                reward=reward,
+-                                value=value,
+-                                policy=policy)
+-
+-        return init, (initial_inference, recurrent_inference)
+-
+-    return hk.without_apply_rng(hk.multi_transform(fn))
+-
+-@struct.dataclass
+-class NetworkOutput:
+-    embedding: jnp.ndarray
+-    next_embedding: jnp.ndarray
+-    reward: jnp.ndarray
+-    value: jnp.ndarray
+-    policy: jnp.ndarray
+-    
+-@struct.dataclass
+-class NetworkApplys:
+-    initial_inference: callable
+-    recurrent_inference: callable
+diff --git a/sebulla_muzero/replay_buffer.py b/sebulla_muzero/replay_buffer.py
+deleted file mode 100644
+index b1a82dd..0000000
+--- a/sebulla_muzero/replay_buffer.py
++++ /dev/null
+@@ -1,279 +0,0 @@
+-import time
+-import queue
+-import threading
+-from typing import Any, Union 
+-
+-import numpy as np
+-import jax
+-import jax.numpy as jnp
+-from flax import struct
+-
+-import pickle
+-import zstandard as zstd
+-
+-
+-State = Any
+-Sample = Any
+-
+-@struct.dataclass
+-class Trajectory:
+-    observation: jnp.ndarray
+-    action: jnp.ndarray
+-    value_target: jnp.ndarray
+-    policy_target: jnp.ndarray
+-    reward_target: jnp.ndarray
+-    priority: jnp.ndarray
+-
+-@struct.dataclass
+-class Batch:
+-    observation: jnp.ndarray
+-    actions: jnp.ndarray
+-    value: jnp.ndarray
+-    policy: jnp.ndarray
+-    reward: jnp.ndarray
+-    
+-class GameHistory:
+-  def __init__(self, config=None):
+-    self.config = config
+-    self.max_length = config.sequence_length
+-    
+-    self.prefix_length = config.num_stacked_frames
+-    self.suffix_length = config.num_unroll_steps + config.td_steps
+-
+-    self.observations = []
+-    self.actions = []
+-    self.value_targets = []
+-    self.policy_targets = []
+-    self.rewards = []
+-    self.dones = []
+-
+-  # TODO: need a good method for managing features before and after the scope of this game history
+-  def init(self, obs, action, value_target, policy_target, reward, done):
+-    self.observations.extend(obs)
+-    self.actions.extend(action)
+-    self.value_targets.extend(value_target)
+-    self.policy_targets.extend(policy_target)
+-    self.rewards.extend(reward)
+-    self.dones.extend(done)
+-
+-  def make_features(self, step_idx):
+-    # TODO: need to look at dones and zero out value predictions after done
+-    """
+-    Given a step index returns the corresponding features for that game history.
+-    Real Index:
+-      [] indicates valid step_idx range
+-      -prefix_length ...... [0 ....... sequence_length] ........ + suffix_length
+-    Prefixed features:
+-      range: -prefix_length ...... [0 ....... sequence_length]
+-      features: obs, action
+-    Suffixed features:
+-      range: [0 ....... sequence_length] ........ + suffix_length
+-      features: value, policy, reward
+-      
+-    Note: prefixed features need to be shifted by prefix_length to align with suffixed features.
+-          That is the job of prefix_step_idx.
+-    """
+-    K = self.config.num_unroll_steps
+-    # prefixed
+-    prefix_step_idx = step_idx + self.prefix_length
+-    obs = np.asarray(self.observations[prefix_step_idx - self.prefix_length : prefix_step_idx])
+-    action = np.asarray(self.actions[prefix_step_idx - self.prefix_length : prefix_step_idx+K])
+-    # suffixed
+-    value = np.asarray(self.value_targets[step_idx:step_idx+K])
+-    policy = np.asarray(self.policy_targets[step_idx:step_idx+K])
+-    rewards = np.asarray(self.rewards[step_idx:step_idx+K])
+-    return obs, action, value, policy, rewards
+-
+-  def _make_obs_stack(self):
+-    pass
+-  
+-  def _prevent_episode_boundry_crossing(self):
+-    pass
+-  
+-  def assert_match(self, priority):
+-    return len(self) == len(priority) - self.prefix_length - self.suffix_length
+-  
+-  def __len__(self):
+-    prefixed_vars_len = len(self.observations) - self.prefix_length
+-    suffixed_vars_len = len(self.dones) - self.suffix_length
+-    full_vars_len = len(self.actions) - self.prefix_length - self.suffix_length
+-    assert prefixed_vars_len == suffixed_vars_len == full_vars_len, "GameHistory variables must be the same length."
+-    return prefixed_vars_len
+-
+-class ReplayBuffer:
+-  """
+-  Replay buffer for storing GameHistory objects and their associated priorities.
+-  
+-  Due to large memory requirements, zstd compression is used to compress each GameHistory object in the buffer.
+-  They are decompressed on the fly when sampled.
+-  
+-  Compression Factor: 
+-    Uncompressed GameHistory
+-    Compressed GameHistory
+-
+-  This class is largely a port of Efficient Zero Ye et al. (2020) https://arxiv.org/pdf/2111.00210.pdf
+-  """
+-
+-  def __init__(self, max_size: int, batch_size: int, config) -> None:
+-    self.args = config.args
+-    self.batch_size = batch_size
+-    self.max_size = max_size
+-    self.base_index = 0
+-    self.collected_count = 0
+-    self.alpha = 1
+-    self.beta = 1
+-
+-    self.buffer: list[GameHistory] = []
+-    self.priorities: Union[None, np.ndarray] = None
+-    self.game_lookup: list[list[tuple]] = [] # each tuple is (game_index, step_index)
+-
+-    self.game_steps_seen = 0
+-    self.game_steps_to_start = batch_size * 1 # how many batches do you want to collect before starting to sample
+-
+-    self.zstd_compressor = zstd.ZstdCompressor()
+-    self.zstd_decompressor = zstd.ZstdDecompressor()
+-    
+-    self.scalar_to_categorical = jax.jit(config.scalar_to_categorical, backend="cpu")
+-
+-  def put_games(self, games: tuple[GameHistory, np.ndarray]) -> None:
+-    """
+-    Add a list of games (tuples of game_history and priorities) to the replay buffer.
+-    """
+-    for game_history, priority in games:
+-      self._put_game(game_history, priority)
+-
+-
+-  def _put_game(self, game: GameHistory, priorities: np.ndarray) -> None:
+-    """
+-    Add a game_history and corresponding priorities to the replay buffer.
+-    """
+-    #assert game_history.assert_match(priorities), "GameHistory and priorities must be the same length."
+-    assert len(game) == len(priorities), "GameHistory and priorities must be the same length"
+-
+-    bytes = pickle.dumps(game)
+-    compressed_game = self.zstd_compressor.compress(bytes)
+-    self.buffer.append(compressed_game)
+-    self.priorities = priorities if not self.game_steps_seen else np.concatenate([self.priorities, priorities])
+-    self.game_lookup += [(self.base_index + len(self.buffer) - 1, step_index) for step_index in range(len(game))]
+-    self.game_steps_seen += len(game) * self.args.sequence_length
+-
+-  def sample(self):
+-    """
+-    Sample a batch according to PER and calculate the importance sampling weights to correct for bias in loss calculation.
+-
+-    i.e. 
+-    """
+-    if self.game_steps_to_start > self.game_steps_seen:
+-      return None 
+-    universe = len(self.priorities)
+-    sample_probs = np.power(self.priorities, self.alpha)
+-    sample_probs = np.divide(sample_probs, np.sum(sample_probs))
+-    sampled_indices = np.random.choice(universe, size=self.batch_size, p=sample_probs, replace=False)
+-    weights = (1 / universe) * np.reciprocal(sample_probs[sampled_indices])
+-    weights = np.power(weights, self.beta)
+-
+-    # create decompression efficient index 'smart_indicies' {game_index: [step_indices]}
+-    # to prevent redundant decompression of the same game_history
+-    smart_indicies = {}
+-    for index in sampled_indices:
+-      game_index, step_index = self.game_lookup[index]
+-      if game_index not in smart_indicies:
+-        smart_indicies[game_index] = []
+-      smart_indicies[game_index].append(step_index)
+-
+-    observations = []
+-    actions = []
+-    values = []
+-    policies = []
+-    rewards = []
+-    for game_index in smart_indicies.keys():
+-      bytes = self.zstd_decompressor.decompress(self.buffer[game_index])
+-      game_history = pickle.loads(bytes)
+-      for step_index in smart_indicies[game_index]:
+-        obs, action, value, policy, reward = game_history.make_features(step_index)
+-        observations.append(obs)
+-        actions.append(action)
+-        values.append(value)
+-        policies.append(policy)
+-        rewards.append(reward)
+-
+-    observations = np.asarray(observations)
+-    actions = np.asarray(actions)
+-    values = np.asarray(values)
+-    policies = np.asarray(policies)
+-    rewards = np.asarray(rewards)
+-    
+-    values = self.scalar_to_categorical(values)
+-    rewards = self.scalar_to_categorical(rewards)
+-    
+-    batch = Batch(
+-      observation=observations,
+-      actions=actions,
+-      value=values,
+-      policy=policies,
+-      reward=rewards
+-    )
+-    
+-    return batch, weights, sampled_indices
+-
+-  def update_priorities(self, indices: np.ndarray, priorities: np.ndarray) -> None:
+-    """
+-    Update the priorities of the replay buffer.
+-    """
+-    self.priorities[indices] = priorities
+-
+-
+-##############################################################################################################
+-  
+-def start_replay_buffer_manager(rollout_queue, batch_queue, config):
+-  """
+-  Conviences function for starting the replay buffer manager.
+-  Responsible for managing the communication between the actor and learner processes
+-  """
+-  args = config.args
+-
+-  def preprocess_data(rollout):
+-    """Convert a batched rollout to a list of GameHistory objects."""
+-    
+-    game_histories = []
+-    for i in range(args.local_num_envs):
+-      game_history = GameHistory(args)
+-      game_history.init(
+-          obs=rollout.obs[i],
+-          action=rollout.actions[i],
+-          value_target=rollout.value_targets[i],
+-          policy_target=rollout.policy_targets[i],
+-          reward=rollout.rewards[i],
+-          done=rollout.dones[i],
+-          )
+-      game_histories.append((game_history, rollout.priorities[i]))
+-    return game_histories
+-
+-  def rollout_queue_to_replay_buffer(replay_buffer, queue, rollout_queue):
+-        """ Thread dedicated to processing rollouts and inserting data in the replay buffer."""
+-        while True:
+-          rollouts = rollout_queue.get()
+-          game_histories = preprocess_data(rollouts)
+-          replay_buffer = queue.get()
+-          replay_buffer.put_games(game_histories)
+-          queue.put(replay_buffer)
+-    
+-  def replay_buffer_to_batch_queue(replay_buffer, queue, batch_queue):
+-      """Thread dedicated to sampling data from the replay buffer and populating the batch queue."""
+-      while True:
+-          replay_buffer = queue.get()
+-          batch = replay_buffer.sample()
+-          if batch is None: 
+-            queue.put(replay_buffer)
+-            time.sleep(1)
+-            continue
+-          queue.put(replay_buffer)
+-          batch_queue.put(batch)
+-
+-  replay_buffer = ReplayBuffer(args.buffer_size, args.batch_size, config)
+-
+-  access_queue = queue.Queue(1)
+-  access_queue.put(replay_buffer)
+-
+-  threading.Thread(target=rollout_queue_to_replay_buffer, args=(replay_buffer, access_queue, rollout_queue)).start()
+-  threading.Thread(target=replay_buffer_to_batch_queue, args=(replay_buffer, access_queue, batch_queue)).start()
+\ No newline at end of file
+diff --git a/sebulla_muzero/runs/Breakout-v5__main__1__cbeaa91f-d248-4302-9b3e-615a7359bd2d/events.out.tfevents.1681781524.t1v-n-9ec8b123-w-0 b/sebulla_muzero/runs/Breakout-v5__main__1__cbeaa91f-d248-4302-9b3e-615a7359bd2d/events.out.tfevents.1681781524.t1v-n-9ec8b123-w-0
+deleted file mode 100644
+index bc1f22f..0000000
+Binary files a/sebulla_muzero/runs/Breakout-v5__main__1__cbeaa91f-d248-4302-9b3e-615a7359bd2d/events.out.tfevents.1681781524.t1v-n-9ec8b123-w-0 and /dev/null differ
+diff --git a/sebulla_muzero/test.py b/sebulla_muzero/test.py
+deleted file mode 100644
+index 7a181d1..0000000
+--- a/sebulla_muzero/test.py
++++ /dev/null
+@@ -1,24 +0,0 @@
+-import jax
+-import jax.numpy as jnp
+-
+-from network import make_muzero_network, NetworkApplys 
+-
+-batch_size = 32
+-support_size = 601
+-num_actions = 4
+-
+-muzero_network = make_muzero_network(support_size, num_actions=4)
+-apply = NetworkApplys(*muzero_network.apply)
+-
+-key = jax.random.PRNGKey(0)
+-observation = jnp.ones((32, 4, 96, 96))
+-actions = jnp.ones(32)
+-params = muzero_network.init(key, observation, actions)
+-
+-network_output = apply.network(params, observation, actions)
+-
+-assert network_output.embedding.shape == (batch_size, 6, 6, 256)
+-assert network_output.next_embedding.shape == (batch_size, 6, 6, 256)
+-assert network_output.reward.shape == (batch_size, support_size)
+-assert network_output.value.shape == (batch_size, support_size)
+-assert network_output.policy.shape == (batch_size, num_actions)
+\ No newline at end of file
+diff --git a/sebulla_muzero/utils.py b/sebulla_muzero/utils.py
+deleted file mode 100644
+index a6cacaf..0000000
+--- a/sebulla_muzero/utils.py
++++ /dev/null
+@@ -1,127 +0,0 @@
+-import jax
+-import chex
+-import optax
+-import haiku as hk
+-from flax import struct
+-import jax.numpy as jnp
+-import rlax
+-from rlax._src import nonlinear_bellman
+-
+-import gym
+-
+-@struct.dataclass
+-class TrainState:
+-    params: hk.Params
+-    target_params: hk.Params
+-    opt_state: optax.OptState
+-    train_step: chex.Array
+-  
+-# mctx does this for you 
+-# @struct.dataclass
+-# class MinMaxScaling:
+-#     minimum: float
+-#     maximum: float
+-
+-#     def update(min_max_scale, value):
+-def softmax_temperature_fn(train_step, train_steps):
+-    percent_complete = train_step / train_steps
+-    return jax.lax.cond(
+-        jnp.less_equal(
+-            percent_complete,
+-            0.5),
+-        lambda: 1.,
+-        lambda: jax.lax.select(
+-            jnp.less_equal(
+-                percent_complete,
+-                0.75),
+-            0.5,
+-            0.25)
+-        )
+-
+-def make_action_encoding_fn(embeding_resolution, obs_resolution, num_actions):
+-    """
+-    Turns a batch of actions into a ont-hot encoding tiled to (batch_dim, resolution, resolution)
+-    """
+-
+-    def tiled_encoding(action):
+-        """Turns a scalar action into a ont-hot encoding tiled to (resolution, resolution)"""
+-        one_hot = jax.nn.one_hot(action, num_actions)
+-        reshape = jnp.reshape(one_hot, (2, 2))
+-        return jnp.tile(reshape, (embeding_resolution // 2, embeding_resolution // 2))
+-
+-    def bias_plane_encoding(scalar_action):
+-        return jnp.broadcast_to(scalar_action, (obs_resolution, obs_resolution)) / num_actions
+-
+-    return jax.vmap(tiled_encoding), jax.vmap(jax.vmap(bias_plane_encoding))
+-
+-def make_categorical_representation_fns(support_size):
+-    """
+-    Creates functions for mapping scalar->categorical and categorical->scalar representations
+-    $/phi$ in Schrittwieser et al., 2020, Appendix F
+-    """
+-    support_min_max = support_size - 1
+-    support_min = -(support_min_max / 2)
+-    support_max = support_min_max / 2
+-    
+-    tx = rlax.muzero_pair(num_bins=support_size,
+-                        min_value=support_min,
+-                        max_value=support_max,
+-                        tx=nonlinear_bellman.SIGNED_HYPERBOLIC_PAIR) # h(x) in Schrittwieser et al., 2020, Appendix F
+-
+-    def scalar_to_categorical(scalar):
+-        return tx.apply(scalar)
+-
+-    def categorical_to_scalar(categorical):
+-        probability = jax.nn.softmax(categorical, axis=-1)
+-        return tx.apply_inv(probability)
+-
+-    return scalar_to_categorical, categorical_to_scalar
+-
+-def nonlinux_make_env(env_id, seed, num_envs, async_batch_size=1):
+-    """
+-    Used to clone make_env behvaior when not on a Linux machine (i.e. devloping locally)
+-    """
+-
+-    class FacadeEnvPoolEnvironment:
+-        """
+-        Clone of envpools env for testing/devlopment on non-linux machine
+-        NOTE: Maps to Breakout-v5 only
+-        """
+-
+-        def __init__(self, num_envs, async_batch_size):
+-            self.num_envs = num_envs
+-            self.async_batch_size = async_batch_size
+-            self.single_action_space = gym.spaces.Discrete(4)
+-            self.single_observation_space = gym.spaces.Box(low=0., high=255., shape=(32*3, 84, 84))
+-            
+-            self._max_episode_steps = 1000
+-            self.max_episode_steps = self._max_episode_steps
+-            self.config = self
+-            self.spec = self
+-            
+-        def config(self):
+-            return self
+-        
+-        def spec(self):
+-            return self
+-        
+-        def async_reset(self):
+-            return
+-        
+-        def recv(self):
+-            batch_size = self.async_batch_size
+-            next_obs = jnp.zeros((batch_size, *self.single_observation_space.shape))
+-            next_reward = jnp.zeros(batch_size)
+-            next_done = jnp.full(batch_size, False)
+-            info = {'env_id': jnp.arange(batch_size),
+-                    'elapsed_step': jnp.ones(batch_size) * 1000,
+-                    'terminated': next_done,
+-                    'reward': next_reward}
+-            return next_obs, next_reward, next_done, None, info
+-
+-        def send(self, action, env_id):
+-            return
+-
+-    return lambda : FacadeEnvPoolEnvironment(num_envs, async_batch_size)
+-    # lambda is required to mirror envpool api
+-

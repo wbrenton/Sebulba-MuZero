@@ -1,0 +1,27 @@
+2023-04-19 19:32:23,322 INFO    MainThread:992151 [wandb_setup.py:_flush():76] Configure stats pid to 992151
+2023-04-19 19:32:23,322 INFO    MainThread:992151 [wandb_setup.py:_flush():76] Loading settings from /home/will/.config/wandb/settings
+2023-04-19 19:32:23,322 INFO    MainThread:992151 [wandb_setup.py:_flush():76] Loading settings from /home/will/Sebulba-MuZero/sebulba_muzero/wandb/settings
+2023-04-19 19:32:23,322 INFO    MainThread:992151 [wandb_setup.py:_flush():76] Loading settings from environment variables: {}
+2023-04-19 19:32:23,322 INFO    MainThread:992151 [wandb_setup.py:_flush():76] Applying setup settings: {'_disable_service': False}
+2023-04-19 19:32:23,322 INFO    MainThread:992151 [wandb_setup.py:_flush():76] Inferring run settings from compute environment: {'program_relpath': 'sebulba_muzero/main.py', 'program': '/home/will/Sebulba-MuZero/sebulba_muzero/main.py'}
+2023-04-19 19:32:23,322 INFO    MainThread:992151 [wandb_init.py:_log_setup():507] Logging user logs to /home/will/Sebulba-MuZero/sebulba_muzero/wandb/run-20230419_193223-me4wxktw/logs/debug.log
+2023-04-19 19:32:23,322 INFO    MainThread:992151 [wandb_init.py:_log_setup():508] Logging internal logs to /home/will/Sebulba-MuZero/sebulba_muzero/wandb/run-20230419_193223-me4wxktw/logs/debug-internal.log
+2023-04-19 19:32:23,322 INFO    MainThread:992151 [wandb_init.py:init():547] calling init triggers
+2023-04-19 19:32:23,323 INFO    MainThread:992151 [wandb_init.py:init():554] wandb.init called with sweep_config: {}
+config: {'exp_name': 'main', 'seed': 1, 'save_model': False, 'env_id': 'Breakout-v5', 'gray_scale': False, 'total_updates': 1000000, 'update_frequency': 1000, 'local_num_envs': 50, 'batch_size': 1024, 'learning_rate': 0.001, 'weight_decay': 0.001, 'num_unroll_steps': 5, 'td_steps': 5, 'gamma': 0.997, 'num_simulations': 50, 'support_size': 601, 'num_stacked_frames': 32, 'obs_resolution': 84, 'embedding_resolution': 6, 'update_every': 1000, 'clip_coef': 0.1, 'value_coef': 0.5, 'buffer_size': 10, 'sequence_length': 200, 'actor_device_ids': [0, 1], 'num_actor_threads': 2, 'learner_device_ids': [2, 3], 'distributed': False, 'profile': False, 'test_actor_learner_throughput': False, 'track': True, 'wandb_project_name': 'SebulbaMuzero', 'wandb_entity': None, 'capture_video': False, 'num_steps': 200, 'channels_per_frame': 3, 'world_size': 1, 'local_rank': 0, 'num_envs': 50, 'global_learner_decices': ['TPU_2(process=0,(0,1,0,0))', 'TPU_3(process=0,(1,1,0,0))'], 'actor_devices': ['TPU_0(process=0,(0,0,0,0))', 'TPU_1(process=0,(1,0,0,0))'], 'learner_devices': ['TPU_2(process=0,(0,1,0,0))', 'TPU_3(process=0,(1,1,0,0))']}
+2023-04-19 19:32:23,323 INFO    MainThread:992151 [wandb_init.py:init():595] starting backend
+2023-04-19 19:32:23,323 INFO    MainThread:992151 [wandb_init.py:init():599] setting up manager
+2023-04-19 19:32:23,326 INFO    MainThread:992151 [backend.py:_multiprocessing_setup():106] multiprocessing start_methods=fork,spawn,forkserver, using: spawn
+2023-04-19 19:32:23,328 INFO    MainThread:992151 [wandb_init.py:init():605] backend started and connected
+2023-04-19 19:32:23,333 INFO    MainThread:992151 [wandb_init.py:init():695] updated telemetry
+2023-04-19 19:32:23,609 INFO    MainThread:992151 [wandb_init.py:init():732] communicating run to backend with 60.0 second timeout
+2023-04-19 19:32:23,773 INFO    MainThread:992151 [wandb_run.py:_on_init():2176] communicating current version
+2023-04-19 19:32:23,825 INFO    MainThread:992151 [wandb_run.py:_on_init():2185] got version response 
+2023-04-19 19:32:23,825 INFO    MainThread:992151 [wandb_init.py:init():782] starting run threads in backend
+2023-04-19 19:32:24,057 INFO    MainThread:992151 [wandb_run.py:_console_start():2157] atexit reg
+2023-04-19 19:32:24,057 INFO    MainThread:992151 [wandb_run.py:_redirect():2012] redirect: SettingsConsole.WRAP_RAW
+2023-04-19 19:32:24,058 INFO    MainThread:992151 [wandb_run.py:_redirect():2077] Wrapping output streams.
+2023-04-19 19:32:24,058 INFO    MainThread:992151 [wandb_run.py:_redirect():2102] Redirects installed.
+2023-04-19 19:32:24,059 INFO    MainThread:992151 [wandb_init.py:init():824] run started, returning control to user process
+2023-04-19 19:32:24,060 INFO    MainThread:992151 [wandb_run.py:_tensorboard_callback():1432] tensorboard callback: runs/Breakout-v5__main__1__ceeec8fd-8b57-44d3-a928-7bf53ffd240c, True
+2023-04-19 21:53:46,592 WARNING MsgRouterThr:992151 [router.py:message_loop():77] message_loop has been closed

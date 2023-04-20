@@ -16,10 +16,18 @@ class TrainState:
     opt_state: optax.OptState
     train_step: chex.Array
   
-def min_max_scaling():
-    pass
+def min_max_normalize(x):
+    min = jnp.min(x)
+    max = jnp.max(x)
+    return (x - min) / (max - min)
 
 def softmax_temperature_fn(train_step, train_steps):
+    """
+    Temperature annealing function from Schrittwieser et al., 2020, Appendix F
+        0-500k steps: 1
+        500k-750k steps: 0.5
+        750k-1M steps: 0.25
+    """
     percent_complete = train_step / train_steps
     return jax.lax.cond(
         jnp.less_equal(
@@ -36,23 +44,24 @@ def softmax_temperature_fn(train_step, train_steps):
 
 def make_action_encoding_fn(embeding_resolution, obs_resolution, num_actions):
     """
-    Turns a batch of actions into a ont-hot encoding tiled to (batch_dim, resolution, resolution)
+    recurrent_fn_action_encoder: 
+        operates on a batch of actions of shape (batch_dim,)
+    initial_fn_action_encoder:
+        operates on a batch of actions over time of shape (batch_dim, time_dim)
     """
 
-    def tiled_encoding(action):
-        """Turns a scalar action into a ont-hot encoding tiled to (resolution, resolution)"""
-        one_hot = jax.nn.one_hot(action, num_actions)
-        reshape = jnp.reshape(one_hot, (2, 2))
-        return jnp.tile(reshape, (embeding_resolution // 2, embeding_resolution // 2))
-
-    def bias_plane_encoding(scalar_action):
+    def initial_action_encoder(scalar_action):
         return jnp.broadcast_to(scalar_action, (obs_resolution, obs_resolution)) / num_actions
 
-    return jax.vmap(tiled_encoding), jax.vmap(jax.vmap(bias_plane_encoding))
+    def recurrent_action_encoder(scalar_action):
+        return jnp.broadcast_to(scalar_action, (embeding_resolution, embeding_resolution)) / num_actions
+
+    return jax.vmap(jax.vmap(initial_action_encoder)), jax.vmap(recurrent_action_encoder)
 
 def make_categorical_representation_fns(support_size):
     """
     Creates functions for mapping scalar->categorical and categorical->scalar representations
+    Signed hyperbolic pair is h(x) in Schrittwieser et al., 2020, Appendix F
     $/phi$ in Schrittwieser et al., 2020, Appendix F
     """
     support_min_max = support_size - 1
@@ -62,7 +71,7 @@ def make_categorical_representation_fns(support_size):
     tx = rlax.muzero_pair(num_bins=support_size,
                         min_value=support_min,
                         max_value=support_max,
-                        tx=nonlinear_bellman.SIGNED_HYPERBOLIC_PAIR) # h(x) in Schrittwieser et al., 2020, Appendix F
+                        tx=nonlinear_bellman.SIGNED_HYPERBOLIC_PAIR) 
 
     def scalar_to_categorical(scalar):
         return tx.apply(scalar)
@@ -120,4 +129,9 @@ def nonlinux_make_env(env_id, seed, num_envs, async_batch_size=1):
 
     return lambda : FacadeEnvPoolEnvironment(num_envs, async_batch_size)
     # lambda is required to mirror envpool api
-
+    
+# def tiled_encoding(action):
+#     """Turns a scalar action into a ont-hot encoding tiled to (resolution, resolution)"""
+#     one_hot = jax.nn.one_hot(action, num_actions)
+#     reshape = jnp.reshape(one_hot, (2, 2))
+#     return jnp.tile(reshape, (embeding_resolution // 2, embeding_resolution // 2))

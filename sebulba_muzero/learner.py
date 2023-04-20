@@ -36,14 +36,14 @@ def make_single_device_update(applys, optimizer, config):
 
         # initial inference
         obs_stack = batch.observation.reshape((-1, *args.obs_shape))
-        action_stack = batch.actions[:, :-K]
+        action_stack = batch.action[:, :-K]
         h_0, v_0, p_0 = applys.initial_inference(params, obs_stack, action_stack)
         predictions = [(1.0, None, v_0, p_0)]
 
         # TODO: pretty sure you wont reach the last K
         # unroll model with recurrent inference for K steps
         h_k = h_0
-        unroll_actions = batch.actions[:, -K:]
+        unroll_actions = batch.action[:, -K:]
         for k in range(K):
             h_kp1, r_k, v_k, p_k  = applys.recurrent_inference(params, h_k, unroll_actions[:, k])
             predictions.append((1/K, r_k, v_k, p_k))
@@ -53,11 +53,11 @@ def make_single_device_update(applys, optimizer, config):
         for k, (scale, r_k, v_k, p_k) in enumerate(predictions):
             v_loss = jnp.mean(softmax_cross_entropy(v_k, batch.value[:, k]))
             p_loss = jnp.mean(softmax_cross_entropy(p_k, batch.policy[:, k]))
-            if k == 0 :
+            if k != 0 and r_k is not None:
                 r_loss = jnp.mean(softmax_cross_entropy(r_k, batch.reward[:, k]))
-                l_k = scale_gradient(v_loss + p_loss, scale)
-            else:
                 l_k = scale_gradient(v_loss + p_loss + r_loss, scale)
+            else:
+                l_k = scale_gradient(v_loss + p_loss, scale)
             loss += l_k
             h_k = h_kp1
 
@@ -68,7 +68,7 @@ def make_single_device_update(applys, optimizer, config):
     def single_device_update(muzero_state, batch):
         (loss, (v_loss, p_loss, r_loss)), grads = value_and_grad(muzero_state.params, batch)
         grads = jax.lax.pmean(grads, axis_name="local_devices")
-        updates, new_opt_state = optimizer.update(grads, muzero_state.opt_state)
+        updates, new_opt_state = optimizer.update(grads, muzero_state.opt_state, muzero_state.params)
         new_params = optax.apply_updates(muzero_state.params, updates)
         muzero_state = muzero_state.replace(
             params=new_params,

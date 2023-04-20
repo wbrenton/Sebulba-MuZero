@@ -1,0 +1,299 @@
+num_cpus 240
+Thread 0 started!Thread 1 started!
+Thread 2 started!Thread 3 started!
+Thread 1 finished rollout 80000 in 107.0954978466034 and put it in the queue in 0.0002288818359375
+Thread 0 finished rollout 80000 in 107.0444266796112 and put it in the queue in 0.0005462169647216797
+Thread 2 finished rollout 80000 in 129.38410067558289 and put it in the queue in 0.00020551681518554688
+Thread 3 finished rollout 80000 in 129.3339478969574 and put it in the queue in 7.843971252441406e-05
+Thread 1 finished rollout 120000 in 105.55406284332275 and put it in the queue in 0.00012087821960449219
+Thread 0 finished rollout 120000 in 105.81690335273743 and put it in the queue in 0.0005471706390380859
+Thread 2 finished rollout 120000 in 124.75277137756348 and put it in the queue in 0.00013756752014160156
+Thread 3 finished rollout 120000 in 125.01567530632019 and put it in the queue in 0.00011944770812988281
+Thread 1 finished rollout 160000 in 106.3992555141449 and put it in the queue in 0.0001163482666015625
+Thread 0 finished rollout 160000 in 106.43752002716064 and put it in the queue in 0.00017547607421875
+Thread 2 finished rollout 160000 in 125.12935853004456 and put it in the queue in 0.00011563301086425781
+Thread 3 finished rollout 160000 in 125.12306618690491 and put it in the queue in 0.0002675056457519531
+Thread 1 finished rollout 200000 in 107.08564972877502 and put it in the queue in 0.00014710426330566406
+Thread 0 finished rollout 200000 in 107.56552004814148 and put it in the queue in 0.00024628639221191406
+Thread 2 finished rollout 200000 in 133.4064154624939 and put it in the queue in 0.00014472007751464844
+Thread 3 finished rollout 200000 in 133.46447038650513 and put it in the queue in 0.00018358230590820312
+Thread 1 finished rollout 240000 in 113.18480515480042 and put it in the queue in 0.00012063980102539062
+Thread 0 finished rollout 240000 in 112.64721345901489 and put it in the queue in 0.0006039142608642578
+Thread 1 finished rollout 280000 in 112.22225141525269 and put it in the queue in 0.0001499652862548828
+Thread 0 finished rollout 280000 in 113.43325233459473 and put it in the queue in 0.0003199577331542969
+Thread 3 finished rollout 240000 in 134.6799671649933 and put it in the queue in 0.0001323223114013672
+Thread 2 finished rollout 240000 in 136.53448247909546 and put it in the queue in 0.00013566017150878906
+Thread 1 finished rollout 320000 in 110.26739931106567 and put it in the queue in 0.00020003318786621094
+Thread 0 finished rollout 320000 in 110.2787344455719 and put it in the queue in 0.00040912628173828125
+Thread 3 finished rollout 280000 in 133.3675138950348 and put it in the queue in 0.00020623207092285156
+Thread 2 finished rollout 280000 in 132.10101008415222 and put it in the queue in 0.0001246929168701172
+Thread 1 finished rollout 360000 in 109.20119786262512 and put it in the queue in 0.00029778480529785156
+Thread 0 finished rollout 360000 in 109.00926923751831 and put it in the queue in 0.00019240379333496094
+Thread 3 finished rollout 320000 in 128.65883708000183 and put it in the queue in 0.00011396408081054688
+Thread 2 finished rollout 320000 in 129.71103763580322 and put it in the queue in 0.0001163482666015625
+Thread 1 finished rollout 400000 in 110.58405900001526 and put it in the queue in 0.00012612342834472656
+Thread 0 finished rollout 400000 in 111.78520274162292 and put it in the queue in 0.00018596649169921875
+Thread 2 finished rollout 360000 in 131.48222708702087 and put it in the queue in 0.00019502639770507812
+Thread 3 finished rollout 360000 in 133.0254144668579 and put it in the queue in 0.0001647472381591797
+Thread 1 finished rollout 440000 in 111.68455171585083 and put it in the queue in 0.00014448165893554688
+Thread 0 finished rollout 440000 in 110.62116861343384 and put it in the queue in 0.00037288665771484375
+Thread 3 finished rollout 400000 in 129.61514687538147 and put it in the queue in 0.00014591217041015625
+Thread 2 finished rollout 400000 in 130.13761591911316 and put it in the queue in 0.0001354217529296875
+Thread 1 finished rollout 480000 in 111.90728187561035 and put it in the queue in 0.0001938343048095703
+Thread 0 finished rollout 480000 in 111.29842472076416 and put it in the queue in 0.00020194053649902344
+Thread 1 finished rollout 520000 in 110.90494775772095 and put it in the queue in 0.00012969970703125
+Thread 0 finished rollout 520000 in 110.4323799610138 and put it in the queue in 0.00019550323486328125
+Thread 3 finished rollout 440000 in 129.85464668273926 and put it in the queue in 0.00013327598571777344
+Thread 2 finished rollout 440000 in 129.67091131210327 and put it in the queue in 0.0001125335693359375
+Thread 1 finished rollout 560000 in 111.31729197502136 and put it in the queue in 0.00011730194091796875
+Thread 0 finished rollout 560000 in 111.8017213344574 and put it in the queue in 0.00025200843811035156
+Thread 3 finished rollout 480000 in 129.90116333961487 and put it in the queue in 0.00012302398681640625
+Thread 2 finished rollout 480000 in 130.8415811061859 and put it in the queue in 0.00011301040649414062
+Thread 0 finished rollout 600000 in 108.66369581222534 and put it in the queue in 0.00022554397583007812
+Thread 1 finished rollout 600000 in 109.8506908416748 and put it in the queue in 0.00014162063598632812
+Thread 3 finished rollout 520000 in 132.50322794914246 and put it in the queue in 0.0002567768096923828
+Thread 2 finished rollout 520000 in 134.86132788658142 and put it in the queue in 0.00019931793212890625
+Thread 0 finished rollout 640000 in 108.51360654830933 and put it in the queue in 0.00018835067749023438
+Thread 1 finished rollout 640000 in 108.46789383888245 and put it in the queue in 0.0001533031463623047
+Thread 3 finished rollout 560000 in 130.08628129959106 and put it in the queue in 0.00011110305786132812
+Thread 2 finished rollout 560000 in 129.8700315952301 and put it in the queue in 0.0002646446228027344
+Thread 1 finished rollout 680000 in 108.81547403335571 and put it in the queue in 0.00012993812561035156
+Thread 0 finished rollout 680000 in 109.75247740745544 and put it in the queue in 0.00023245811462402344
+Thread 3 finished rollout 600000 in 131.28087973594666 and put it in the queue in 0.00015091896057128906
+Thread 2 finished rollout 600000 in 131.27649855613708 and put it in the queue in 0.00012731552124023438
+Thread 1 finished rollout 720000 in 108.19347786903381 and put it in the queue in 0.00011324882507324219
+Thread 0 finished rollout 720000 in 108.91581463813782 and put it in the queue in 0.00024437904357910156
+Thread 1 finished rollout 760000 in 108.88429594039917 and put it in the queue in 0.00013637542724609375
+Thread 3 finished rollout 640000 in 128.23817825317383 and put it in the queue in 0.00015592575073242188
+Thread 0 finished rollout 760000 in 110.23078966140747 and put it in the queue in 0.00044798851013183594
+Thread 2 finished rollout 640000 in 126.68132376670837 and put it in the queue in 0.00012493133544921875
+Thread 1 finished rollout 800000 in 108.95937085151672 and put it in the queue in 0.00013446807861328125
+Thread 0 finished rollout 800000 in 108.94416499137878 and put it in the queue in 0.00030922889709472656
+Thread 3 finished rollout 680000 in 130.933274269104 and put it in the queue in 0.0001227855682373047
+Thread 2 finished rollout 680000 in 130.12126445770264 and put it in the queue in 0.00014638900756835938
+Exception in thread Thread-11:
+Traceback (most recent call last):
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 954, in _bootstrap_inner
+    self.run()
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 892, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/will/Sebulba-MuZero/sebulba_muzero/replay_buffer.py", line 331, in replay_buffer_to_batch_queue
+    batches = replay_buffer.sample(writer)
+  File "/home/will/Sebulba-MuZero/sebulba_muzero/replay_buffer.py", line 238, in sample
+    batch = jax.tree_map(lambda x: np.array_split(x, num_batches), batch)
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/tree_util.py", line 210, in tree_map
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/tree_util.py", line 210, in <genexpr>
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+  File "/home/will/Sebulba-MuZero/sebulba_muzero/replay_buffer.py", line 238, in <lambda>
+    batch = jax.tree_map(lambda x: np.array_split(x, num_batches), batch)
+  File "<__array_function__ internals>", line 180, in array_split
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/numpy/lib/shape_base.py", line 790, in array_split
+    sub_arys.append(_nx.swapaxes(sary[st:end], axis, 0))
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/array.py", line 343, in __getitem__
+    return lax_numpy._rewriting_take(self, idx)
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/numpy/lax_numpy.py", line 3908, in _rewriting_take
+    return _gather(arr, treedef, static_idx, dynamic_idx, indices_are_sorted,
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/numpy/lax_numpy.py", line 3935, in _gather
+    y = lax.gather(
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/lax/slicing.py", line 286, in gather
+    return gather_p.bind(
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/core.py", line 360, in bind
+    return self.bind_with_trace(find_top_trace(args), args, params)
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/core.py", line 363, in bind_with_trace
+    out = trace.process_primitive(self, map(trace.full_raise, args), params)
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/core.py", line 817, in process_primitive
+    return primitive.impl(*tracers, **params)
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/dispatch.py", line 129, in apply_primitive
+    return compiled_fun(*args)
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/dispatch.py", line 211, in <lambda>
+    return lambda *args, **kw: compiled(*args, **kw)[0]
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/profiler.py", line 314, in wrapper
+    return func(*args, **kwargs)
+  File "/home/will/Sebulba-MuZero/venv/lib/python3.9/site-packages/jax/_src/interpreters/pxla.py", line 1916, in __call__
+    results = self.xla_executable.execute_sharded(input_bufs)
+jaxlib.xla_extension.XlaRuntimeError: RESOURCE_EXHAUSTED: Error allocating device buffer: Attempting to allocate 661.50M. That was not possible. There are 572.56M free.; (0x0x0_HBM0)
+Thread 1 finished rollout 840000 in 109.23031711578369 and put it in the queue in 0.0002560615539550781
+Thread 0 finished rollout 840000 in 109.0555260181427 and put it in the queue in 0.00019502639770507812
+Thread 3 finished rollout 720000 in 129.16930103302002 and put it in the queue in 0.000133514404296875
+Thread 2 finished rollout 720000 in 130.0019404888153 and put it in the queue in 0.00013566017150878906
+Thread 1 finished rollout 880000 in 106.14619755744934 and put it in the queue in 0.00027823448181152344
+Thread 0 finished rollout 880000 in 106.0692298412323 and put it in the queue in 0.0003108978271484375
+Thread 3 finished rollout 760000 in 128.5543782711029 and put it in the queue in 0.00015091896057128906
+Thread 2 finished rollout 760000 in 128.757568359375 and put it in the queue in 0.0001308917999267578
+Thread 1 finished rollout 920000 in 105.61972546577454 and put it in the queue in 0.00016546249389648438
+Thread 0 finished rollout 920000 in 105.65902376174927 and put it in the queue in 0.0005586147308349609
+Thread 3 finished rollout 800000 in 130.46249556541443 and put it in the queue in 0.0002608299255371094
+Thread 2 finished rollout 800000 in 130.21843791007996 and put it in the queue in 0.00011968612670898438
+Thread 1 finished rollout 960000 in 105.846599817276 and put it in the queue in 0.0001366138458251953
+Thread 0 finished rollout 960000 in 105.85467529296875 and put it in the queue in 0.00020837783813476562
+Thread 1 finished rollout 1000000 in 106.09433388710022 and put it in the queue in 0.00012230873107910156
+Thread 0 finished rollout 1000000 in 106.11244368553162 and put it in the queue in 0.00019407272338867188
+Thread 3 finished rollout 840000 in 131.01089239120483 and put it in the queue in 0.00010657310485839844
+Thread 2 finished rollout 840000 in 130.98755836486816 and put it in the queue in 0.00012683868408203125
+Thread 1 finished rollout 1040000 in 106.14986729621887 and put it in the queue in 0.00010704994201660156
+Thread 0 finished rollout 1040000 in 106.29295921325684 and put it in the queue in 0.0002033710479736328
+Thread 3 finished rollout 880000 in 130.35003924369812 and put it in the queue in 0.00026917457580566406
+Thread 2 finished rollout 880000 in 130.03805828094482 and put it in the queue in 0.00011396408081054688
+Thread 1 finished rollout 1080000 in 106.11393189430237 and put it in the queue in 0.00012302398681640625
+Thread 0 finished rollout 1080000 in 105.93798685073853 and put it in the queue in 0.00018358230590820312
+Thread 3 finished rollout 920000 in 126.92898845672607 and put it in the queue in 0.0002028942108154297
+Thread 2 finished rollout 920000 in 126.9836585521698 and put it in the queue in 0.000244140625
+Thread 1 finished rollout 1120000 in 105.94869327545166 and put it in the queue in 0.0001266002655029297
+Thread 0 finished rollout 1120000 in 105.96462392807007 and put it in the queue in 0.00017690658569335938
+Thread 3 finished rollout 960000 in 128.14766645431519 and put it in the queue in 0.00012087821960449219
+Thread 2 finished rollout 960000 in 128.41357231140137 and put it in the queue in 0.00011229515075683594
+Thread 1 finished rollout 1160000 in 106.08893632888794 and put it in the queue in 0.0001087188720703125
+Thread 0 finished rollout 1160000 in 106.13558173179626 and put it in the queue in 0.00020837783813476562
+Thread 3 finished rollout 1000000 in 129.17148780822754 and put it in the queue in 0.0001971721649169922
+Thread 2 finished rollout 1000000 in 128.91049528121948 and put it in the queue in 0.0001239776611328125
+Thread 1 finished rollout 1200000 in 106.13825297355652 and put it in the queue in 0.00011277198791503906
+Thread 0 finished rollout 1200000 in 106.1224467754364 and put it in the queue in 0.00017189979553222656
+Thread 1 finished rollout 1240000 in 105.97281169891357 and put it in the queue in 0.00011157989501953125
+Thread 0 finished rollout 1240000 in 105.86168909072876 and put it in the queue in 0.00044798851013183594
+Thread 3 finished rollout 1040000 in 130.5780155658722 and put it in the queue in 0.0001201629638671875
+Thread 2 finished rollout 1040000 in 130.8380160331726 and put it in the queue in 0.0001316070556640625
+Thread 1 finished rollout 1280000 in 105.64529037475586 and put it in the queue in 0.00011491775512695312
+Thread 0 finished rollout 1280000 in 105.71623992919922 and put it in the queue in 0.00017905235290527344
+Thread 3 finished rollout 1080000 in 130.35534286499023 and put it in the queue in 0.00011515617370605469
+Thread 2 finished rollout 1080000 in 130.10191416740417 and put it in the queue in 0.00011181831359863281
+Thread 1 finished rollout 1320000 in 105.88584852218628 and put it in the queue in 0.000118255615234375
+Thread 0 finished rollout 1320000 in 105.91322445869446 and put it in the queue in 0.0003056526184082031
+Thread 3 finished rollout 1120000 in 130.8580093383789 and put it in the queue in 0.00012159347534179688
+Thread 2 finished rollout 1120000 in 131.41049075126648 and put it in the queue in 0.00012803077697753906
+Thread 1 finished rollout 1360000 in 105.93919849395752 and put it in the queue in 0.00022363662719726562
+Thread 0 finished rollout 1360000 in 105.87226366996765 and put it in the queue in 0.00019478797912597656
+Thread 3 finished rollout 1160000 in 128.98656749725342 and put it in the queue in 0.0001373291015625
+Thread 2 finished rollout 1160000 in 128.6844084262848 and put it in the queue in 0.0001354217529296875
+Thread 1 finished rollout 1400000 in 106.06228232383728 and put it in the queue in 0.0002760887145996094
+Thread 0 finished rollout 1400000 in 106.19408583641052 and put it in the queue in 0.00019788742065429688
+Thread 1 finished rollout 1440000 in 105.97878313064575 and put it in the queue in 0.00016546249389648438
+Thread 0 finished rollout 1440000 in 105.9765510559082 and put it in the queue in 0.00021696090698242188
+Thread 3 finished rollout 1200000 in 129.82626271247864 and put it in the queue in 0.00011157989501953125
+Thread 2 finished rollout 1200000 in 130.05476808547974 and put it in the queue in 0.00010442733764648438
+Thread 1 finished rollout 1480000 in 105.92834877967834 and put it in the queue in 0.0002613067626953125
+Thread 0 finished rollout 1480000 in 105.85655808448792 and put it in the queue in 0.0001964569091796875
+Thread 3 finished rollout 1240000 in 129.5977168083191 and put it in the queue in 0.00011730194091796875
+Thread 2 finished rollout 1240000 in 129.36586809158325 and put it in the queue in 0.00011396408081054688
+Thread 1 finished rollout 1520000 in 106.05852246284485 and put it in the queue in 0.0002560615539550781
+Thread 0 finished rollout 1520000 in 106.06794142723083 and put it in the queue in 0.0002162456512451172
+Thread 3 finished rollout 1280000 in 129.48925375938416 and put it in the queue in 0.00010657310485839844
+Thread 2 finished rollout 1280000 in 129.51124906539917 and put it in the queue in 0.00012254714965820312
+Thread 1 finished rollout 1560000 in 105.738126039505 and put it in the queue in 0.00012874603271484375
+Thread 0 finished rollout 1560000 in 105.72025918960571 and put it in the queue in 0.00018858909606933594
+Thread 3 finished rollout 1320000 in 128.4489562511444 and put it in the queue in 0.0001246929168701172
+Thread 2 finished rollout 1320000 in 128.18331909179688 and put it in the queue in 0.0001087188720703125
+Thread 1 finished rollout 1600000 in 105.87062931060791 and put it in the queue in 0.00011873245239257812
+Thread 0 finished rollout 1600000 in 105.95733308792114 and put it in the queue in 0.00035381317138671875
+Thread 3 finished rollout 1360000 in 128.20748496055603 and put it in the queue in 0.00011086463928222656
+Thread 2 finished rollout 1360000 in 128.49211978912354 and put it in the queue in 0.0001201629638671875
+Thread 1 finished rollout 1640000 in 105.93877935409546 and put it in the queue in 0.00011277198791503906
+Thread 0 finished rollout 1640000 in 105.90704441070557 and put it in the queue in 0.0003077983856201172
+Thread 1 finished rollout 1680000 in 106.05244970321655 and put it in the queue in 0.00014090538024902344
+Thread 0 finished rollout 1680000 in 105.94251871109009 and put it in the queue in 0.0001800060272216797
+Thread 3 finished rollout 1400000 in 132.17083477973938 and put it in the queue in 0.00010991096496582031
+Thread 2 finished rollout 1400000 in 132.39035534858704 and put it in the queue in 0.00012159347534179688
+Thread 1 finished rollout 1720000 in 105.76893067359924 and put it in the queue in 0.00014281272888183594
+Thread 0 finished rollout 1720000 in 105.82746171951294 and put it in the queue in 0.0002014636993408203
+Thread 3 finished rollout 1440000 in 129.74494194984436 and put it in the queue in 0.00011801719665527344
+Thread 2 finished rollout 1440000 in 129.74855494499207 and put it in the queue in 0.00012087821960449219
+Thread 1 finished rollout 1760000 in 105.9146318435669 and put it in the queue in 0.0001544952392578125
+Thread 0 finished rollout 1760000 in 105.92580318450928 and put it in the queue in 0.00018262863159179688
+Thread 3 finished rollout 1480000 in 129.8126802444458 and put it in the queue in 0.000118255615234375
+Thread 2 finished rollout 1480000 in 129.5618176460266 and put it in the queue in 0.0001513957977294922
+Thread 1 finished rollout 1800000 in 105.86066174507141 and put it in the queue in 0.00016117095947265625
+Thread 0 finished rollout 1800000 in 105.85323119163513 and put it in the queue in 0.00020694732666015625
+Thread 3 finished rollout 1520000 in 129.56795024871826 and put it in the queue in 0.0001537799835205078
+Thread 2 finished rollout 1520000 in 129.61105132102966 and put it in the queue in 0.00014781951904296875
+Thread 1 finished rollout 1840000 in 106.16223001480103 and put it in the queue in 0.0001404285430908203
+Thread 0 finished rollout 1840000 in 106.22053837776184 and put it in the queue in 0.0001742839813232422
+Thread 1 finished rollout 1880000 in 105.76834440231323 and put it in the queue in 0.00011396408081054688
+Thread 0 finished rollout 1880000 in 105.75210094451904 and put it in the queue in 0.00018858909606933594
+Thread 3 finished rollout 1560000 in 129.5091097354889 and put it in the queue in 0.0001475811004638672
+Thread 2 finished rollout 1560000 in 129.45195508003235 and put it in the queue in 0.00012874603271484375
+Thread 1 finished rollout 1920000 in 106.02280497550964 and put it in the queue in 0.00012493133544921875
+Thread 0 finished rollout 1920000 in 105.90505290031433 and put it in the queue in 0.0001780986785888672
+Thread 3 finished rollout 1600000 in 129.73211789131165 and put it in the queue in 0.00011873245239257812
+Thread 2 finished rollout 1600000 in 130.01041984558105 and put it in the queue in 0.000156402587890625
+Thread 1 finished rollout 1960000 in 105.95754313468933 and put it in the queue in 0.0001506805419921875
+Thread 0 finished rollout 1960000 in 105.96645045280457 and put it in the queue in 0.00019121170043945312
+Thread 3 finished rollout 1640000 in 130.50711250305176 and put it in the queue in 0.00012302398681640625
+Thread 2 finished rollout 1640000 in 130.24785161018372 and put it in the queue in 0.00012946128845214844
+Thread 1 finished rollout 2000000 in 105.84932827949524 and put it in the queue in 0.00013399124145507812
+Thread 0 finished rollout 2000000 in 105.96932864189148 and put it in the queue in 0.0001876354217529297
+Thread 3 finished rollout 1680000 in 132.1155104637146 and put it in the queue in 0.00013899803161621094
+Thread 2 finished rollout 1680000 in 132.12279725074768 and put it in the queue in 0.00018644332885742188
+Thread 1 finished rollout 2040000 in 105.77495241165161 and put it in the queue in 0.0001475811004638672
+Thread 0 finished rollout 2040000 in 105.71248626708984 and put it in the queue in 0.0002009868621826172
+Thread 1 finished rollout 2080000 in 105.9217882156372 and put it in the queue in 0.00011229515075683594
+Thread 3 finished rollout 1720000 in 128.23241448402405 and put it in the queue in 0.00010991096496582031
+Thread 0 finished rollout 2080000 in 105.84433031082153 and put it in the queue in 0.00018548965454101562
+Thread 2 finished rollout 1720000 in 128.30152940750122 and put it in the queue in 0.0001442432403564453
+Thread 1 finished rollout 2120000 in 105.83109617233276 and put it in the queue in 0.00016379356384277344
+Thread 0 finished rollout 2120000 in 106.18787550926208 and put it in the queue in 0.00022292137145996094
+Thread 3 finished rollout 1760000 in 131.3023886680603 and put it in the queue in 0.00011396408081054688
+Thread 2 finished rollout 1760000 in 131.42852640151978 and put it in the queue in 0.0001373291015625
+Thread 1 finished rollout 2160000 in 106.5437822341919 and put it in the queue in 0.00020694732666015625
+Thread 0 finished rollout 2160000 in 106.02575874328613 and put it in the queue in 0.0003693103790283203
+Thread 3 finished rollout 1800000 in 128.2959520816803 and put it in the queue in 0.00016307830810546875
+Thread 2 finished rollout 1800000 in 128.40849089622498 and put it in the queue in 0.0001220703125
+Thread 1 finished rollout 2200000 in 106.74668550491333 and put it in the queue in 0.0002617835998535156
+Thread 0 finished rollout 2200000 in 106.37703156471252 and put it in the queue in 0.00029158592224121094
+Thread 3 finished rollout 1840000 in 129.7831425666809 and put it in the queue in 0.00011539459228515625
+Thread 2 finished rollout 1840000 in 129.45768308639526 and put it in the queue in 0.0001163482666015625
+Exception in thread Thread-7:
+Traceback (most recent call last):
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 954, in _bootstrap_inner
+    self.run()
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 892, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/will/Sebulba-MuZero/sebulba_muzero/actor.py", line 172, in rollout_fn
+    current_rollout = make_rollout(
+ValueError: RESOURCE_EXHAUSTED: Error allocating device buffer: Attempting to allocate 270.70M. That was not possible. There are 124.63M free. The largest contiguous region of free memory is 124.63M due to fragmentation, but this would fail even if there is zero fragmentation.; (0x0x0_HBM0)
+Thread 0 finished rollout 2240000 in 107.75374460220337 and put it in the queue in 0.0002665519714355469
+Exception in thread Thread-6:
+Traceback (most recent call last):
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 954, in _bootstrap_inner
+    self.run()
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 892, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/will/Sebulba-MuZero/sebulba_muzero/actor.py", line 181, in rollout_fn
+    current_rollout = prefix_padding(current_rollout, last_rollout, initial_obs)
+ValueError: RESOURCE_EXHAUSTED: Error loading program: Attempting to reserve 135.47M at the bottom of memory. That was not possible. There are 130.62M free, 0B reserved, and 130.62M reservable.
+Thread 3 finished rollout 1880000 in 112.16046237945557 and put it in the queue in 0.00011467933654785156
+Thread 2 finished rollout 1880000 in 111.9385552406311 and put it in the queue in 0.00011539459228515625
+Thread 3 finished rollout 1920000 in 105.98593997955322 and put it in the queue in 0.00011777877807617188
+Thread 2 finished rollout 1920000 in 105.95746636390686 and put it in the queue in 0.00012183189392089844
+Thread 3 finished rollout 1960000 in 105.8903968334198 and put it in the queue in 0.00029659271240234375
+Thread 2 finished rollout 1960000 in 105.91701316833496 and put it in the queue in 0.00012683868408203125
+Thread 3 finished rollout 2000000 in 105.88334131240845 and put it in the queue in 0.00012135505676269531
+Thread 2 finished rollout 2000000 in 105.86884260177612 and put it in the queue in 0.00010657310485839844
+Thread 3 finished rollout 2040000 in 105.66731142997742 and put it in the queue in 0.00011777877807617188
+Thread 2 finished rollout 2040000 in 105.67942762374878 and put it in the queue in 0.0001537799835205078
+Thread 3 finished rollout 2080000 in 105.84491395950317 and put it in the queue in 0.00012564659118652344
+Thread 2 finished rollout 2080000 in 105.82615447044373 and put it in the queue in 0.00012087821960449219
+Thread 3 finished rollout 2120000 in 105.86362624168396 and put it in the queue in 0.00011706352233886719
+Thread 2 finished rollout 2120000 in 105.88909077644348 and put it in the queue in 0.00015997886657714844
+Thread 3 finished rollout 2160000 in 106.0390272140503 and put it in the queue in 0.0001201629638671875
+Thread 2 finished rollout 2160000 in 106.55632710456848 and put it in the queue in 0.00020456314086914062
+Thread 3 finished rollout 2200000 in 106.60980987548828 and put it in the queue in 0.00033164024353027344
+Thread 2 finished rollout 2200000 in 106.62417507171631 and put it in the queue in 0.00018668174743652344
+Exception in thread Thread-9:
+Traceback (most recent call last):
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 954, in _bootstrap_inner
+    self.run()
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 892, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/will/Sebulba-MuZero/sebulba_muzero/actor.py", line 172, in rollout_fn
+    current_rollout = make_rollout(
+ValueError: RESOURCE_EXHAUSTED: Error loading program: Attempting to reserve 326.13M at the bottom of memory. That was not possible. There are 177.69M free, 0B reserved, and 177.69M reservable.
+Thread 2 finished rollout 2240000 in 106.11261057853699 and put it in the queue in 0.0003342628479003906
+Thread 2 finished rollout 2280000 in 66.50339412689209 and put it in the queue in 0.0001590251922607422
+Exception in thread Thread-8:
+Traceback (most recent call last):
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 954, in _bootstrap_inner
+    self.run()
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 892, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/will/Sebulba-MuZero/sebulba_muzero/actor.py", line 172, in rollout_fn
+    current_rollout = make_rollout(

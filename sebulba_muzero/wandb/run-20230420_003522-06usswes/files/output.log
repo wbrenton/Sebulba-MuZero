@@ -1,0 +1,25 @@
+num_cpus 240
+Thread 0 started!Thread 1 started!
+Thread 2 started!Thread 3 started!
+Exception in thread Thread-11:
+Traceback (most recent call last):
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 954, in _bootstrap_inner
+    self.run()
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 892, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/will/Sebulba-MuZero/sebulba_muzero/replay_buffer.py", line 331, in replay_buffer_to_batch_queue
+    batches = replay_buffer.sample()
+TypeError: sample() missing 1 required positional argument: 'writer'
+Traceback (most recent call last):
+  File "/home/will/Sebulba-MuZero/sebulba_muzero/main.py", line 298, in <module>
+    batch = batch_queue.get()
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/queue.py", line 171, in get
+    self.not_empty.wait()
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 312, in wait
+    waiter.acquire()
+KeyboardInterrupt
+Exception ignored in: <module 'threading' from '/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py'>
+Traceback (most recent call last):
+  File "/home/will/.pyenv/versions/3.9.5/lib/python3.9/threading.py", line 1428, in _shutdown
+    lock.acquire()
+KeyboardInterrupt:

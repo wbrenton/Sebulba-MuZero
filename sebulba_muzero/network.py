@@ -4,7 +4,7 @@ import haiku as hk
 import chex
 from flax import struct
 
-from utils import make_action_encoding_fn, make_categorical_representation_fns
+from utils import min_max_normalize
 
 nonlinearity = jax.nn.relu
 
@@ -76,9 +76,7 @@ class RepresentationNetwork(hk.Module):
         self.pooling_final = hk.AvgPool(window_shape=(6, 6), strides=2, padding="SAME") # (6, 6)
 
     def __call__(self, input):
-        # assert input.shape == (batch_dim, 96, 96, 128)
         x = jnp.transpose(input, (0, 2, 3, 1))
-        #x = x / (255.0)
         x = self.conv_0(x)
         x = self.tower_0(x)
         x = self.conv_1(x)
@@ -86,7 +84,7 @@ class RepresentationNetwork(hk.Module):
         x = self.pooling_2(x)
         x = self.tower_2(x)
         embedding = self.pooling_final(x)
-        # assert shape = (batch_dim, 6, 6, 256)
+        #embedding = min_max_normalize(embedding)
         return embedding
 
 class DynamicsNetwork(hk.Module):
@@ -109,7 +107,9 @@ class DynamicsNetwork(hk.Module):
         x = jnp.concatenate((embedding, action_encoding), axis=-1)
 
         next_embedding = self.torso(x)
+        #next_embedding = min_max_normalize(next_embedding)
         reward = self.reward_head(next_embedding)
+        
 
         return next_embedding, reward
 
@@ -154,14 +154,13 @@ def make_muzero_network(config):
 
     def fn():
         representation_net = RepresentationNetwork()
-        dynamics_net = DynamicsNetwork(num_blocks, num_hiddens, support_size, config.tiled_action_encoding_fn)
+        dynamics_net = DynamicsNetwork(num_blocks, num_hiddens, support_size, config.recurrent_action_encoder)
         prediction_net = PredictionNetwork(support_size, num_actions)
 
-        # NOTE: batch size need to be dynamic to accomodate inference and training
-        def make_initial_encoding(obs, action):
-            obs = obs / 255.0
-            action = config.bias_plane_action_encoding_fn(action) 
-            encoding = jnp.concatenate([obs, action], axis=1)
+        def make_initial_encoding(obs_stack, action_stack):
+            obs_stack = obs_stack / 255.0
+            action_enc = config.initial_action_encoder(action_stack) 
+            encoding = jnp.concatenate([obs_stack, action_enc], axis=1)
             assert encoding.shape[1:] == (128, 84, 84) or encoding.shape[1:] == (64, 84, 84)
             return encoding 
 
