@@ -31,7 +31,6 @@ class Batch:
         self.policy.append(p)
         self.reward.append(r)
 
-# finish implementing index method
 @struct.dataclass
 class GameHistory:
     observations: jnp.ndarray
@@ -42,11 +41,22 @@ class GameHistory:
     dones: jnp.ndarray
 
     def add_to_batch(self, batch, b_i, t_i):
-        o = self.observations[b_i, t_i]
-        a = self.actions[b_i, t_i]
-        v = self.values[b_i, t_i]
-        p = self.policies[b_i, t_i]
-        r = self.rewards[b_i, t_i]
+        
+        # TODO make args dynamic instead of hardcoding
+        nsf = 32 # num stacked frames
+        nus = 5 # num unroll steps
+        tds = 5 # td steps
+        
+        @jax.vmap
+        def _slice(b, t):
+            _o = jax.lax.dynamic_slice_in_dim(self.observations[b], t, nsf, axis=0)
+            _a = jax.lax.dynamic_slice_in_dim(self.actions[b], t, nsf+nus, axis=0)
+            _v = jax.lax.dynamic_slice_in_dim(self.values[b], t, nus+tds, axis=0)
+            _p = jax.lax.dynamic_slice_in_dim(self.policies[b], t, nus+tds, axis=0)
+            _r = jax.lax.dynamic_slice_in_dim(self.rewards[b], t, nus+tds, axis=0)
+            return _o, _a, _v, _p, _r
+
+        o, a, v, p, r = _slice(b_i, t_i)
         batch.extend(o, a, v, p, r)
 
 class ReplayBuffer:
@@ -54,6 +64,7 @@ class ReplayBuffer:
     - priorities is of the shape (compression_dim, batch_dim, time_dim)
     """
     def __init__(self):
+        self.max_size = 10 # each element is a compressed game history containing 100 500 step rollouts
         self.batch_size = 1024
         self.timesteps_seen = 0
 
@@ -74,13 +85,17 @@ class ReplayBuffer:
             c_priority = jnp.expand_dims(b_priority, axis=0) # add compression dim
             self.priorities = jnp.concatenate((self.priorities, c_priority), axis=0) # concat along compression dim
 
+        if len(self.buffer) == self.max_size:
+            self.buffer.pop(0)
+            self.priorities = self.priorities[1:,...] # assert this is correct
+        
         b_compressed = self._compress(b_game_history)
         self.buffer.append(b_compressed)
         self.timesteps_seen += b_priorities.size
         del b_game_history
 
     def sample(self, key):
-        index, weights = self._sample(key)
+        index, weights = self._sample(key) # this is surprisingly slow, consider preallocating priorities and using jnp.roll
         buffer_index, batch_index, time_index = index
         decompression_index = jnp.unique(buffer_index)
         batch = self.emtpy_batch(index, weights)
@@ -143,7 +158,7 @@ class ReplayBuffer:
 
     def _started(self):
         return self.timesteps_seen > 0
-    
+
     def buffer_memory_usage(self):
         return sum([len(b) for b in self.buffer]) / 1028**3
 
@@ -169,12 +184,12 @@ if __name__ == "__main__":
     for _ in range(10):
         b_priorities = jax.random.uniform(key, (args.local_num_envs, args.num_steps))
         b_game_history = GameHistory(
-            observations = jax.random.uniform(key, (args.local_num_envs, args.num_steps, 3, 84, 84)),
-            actions = jax.random.uniform(key, (args.local_num_envs, args.num_steps)),
-            values = jax.random.uniform(key, (args.local_num_envs, args.num_steps)),
-            policies = jax.random.uniform(key, (args.local_num_envs, args.num_steps, args.num_actions)),
-            rewards = jax.random.uniform(key, (args.local_num_envs, args.num_steps)),
-            dones = jax.random.uniform(key, (args.local_num_envs, args.num_steps))
+            observations = jax.random.uniform(key, (args.local_num_envs, args.num_steps+32, 3, 84, 84)),
+            actions = jax.random.uniform(key, (args.local_num_envs, args.num_steps+32+5)),
+            values = jax.random.uniform(key, (args.local_num_envs, args.num_steps+5+5)),
+            policies = jax.random.uniform(key, (args.local_num_envs, args.num_steps+5+5, args.num_actions)),
+            rewards = jax.random.uniform(key, (args.local_num_envs, args.num_steps+5+5)),
+            dones = jax.random.uniform(key, (args.local_num_envs, args.num_steps+5+5))
         )
         replay_buffer.add(b_game_history, b_priorities)
         del b_game_history, b_priorities
@@ -184,3 +199,7 @@ if __name__ == "__main__":
     batch = replay_buffer.sample(buffer_key)
 
 
+    # 10 game histories of 100 envs and 500 steps = 6.87 GB
+    # 1000 game histories of 500 steps = 6.87 GB
+    # x 50
+    # 50,000 game histories of 500 steps = 343.5 GB
